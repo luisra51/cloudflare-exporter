@@ -1,5 +1,30 @@
 # Changelog
 
+## 1.2.0
+
+### Added
+
+- Per-host traffic from `httpRequestsAdaptiveGroups` (works on the Free
+  plan) over a rolling window (`CF_ADAPTIVE_WINDOW`, default 5m, ending
+  `CF_ADAPTIVE_DELAY`, default 3m, ago): `cloudflare_zone_host_requests`
+  by status class, optional `cloudflare_zone_host_requests_by_status`
+  (`CF_HOST_EXACT_STATUS`), and, when the zone's `settings` list them,
+  `cloudflare_zone_host_bytes`, `cloudflare_zone_host_origin_5xx_requests`
+  and `cloudflare_zone_host_origin_response_time_seconds`. Hosts are capped
+  by `CF_TOP_HOSTS` (default 50). Flag: `CF_HOST_METRICS`.
+- Edge certificate packs: `cloudflare_zone_certificate_packs`,
+  `cloudflare_zone_certificate_pack_info`,
+  `cloudflare_zone_certificate_pack_active` and
+  `cloudflare_zone_certificate_pack_expiry_timestamp_seconds`. Flag:
+  `CF_CERT_METRICS`.
+- Zero Trust: Access service token expiry and last use, WARP device counts
+  by last-seen bucket and OS (read every `CF_DEVICES_INTERVAL`, default 1h),
+  Gateway DNS queries by resolver decision and Access logins by result.
+  Flag: `CF_ZEROTRUST_METRICS`.
+- A missing permission for any of these groups produces one warning naming
+  it and `cloudflare_exporter_up{dataset=...} 0`; everything else keeps
+  working.
+
 ## 1.1.0
 
 ### Added

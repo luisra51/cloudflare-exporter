@@ -73,6 +73,15 @@ func run(args []string, stdout, stderr io.Writer) int {
 		FirewallEvents: cfg.FirewallEvents,
 		AccountMetrics: cfg.AccountMetrics,
 		TunnelMetrics:  cfg.TunnelMetrics,
+
+		HostMetrics:      cfg.HostMetrics,
+		HostExactStatus:  cfg.HostExactStatus,
+		TopHosts:         cfg.TopHosts,
+		AdaptiveWindow:   cfg.AdaptiveWindow,
+		AdaptiveDelay:    cfg.AdaptiveDelay,
+		ZeroTrustMetrics: cfg.ZeroTrustMetrics,
+		DevicesInterval:  cfg.DevicesInterval,
+		CertMetrics:      cfg.CertMetrics,
 	}, logger)
 
 	reg := prometheus.NewRegistry()

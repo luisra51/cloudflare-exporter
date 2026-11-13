@@ -144,7 +144,8 @@ func TestSettingsAreCached(t *testing.T) {
 	c, _, _ := setup(t, fake, Options{FirewallEvents: true})
 	c.CollectOnce(context.Background())
 	c.CollectOnce(context.Background())
-	if fake.Calls["settings"] != 3 {
+	// Two settings queries per zone (limits + availableFields), once.
+	if fake.Calls["settings"] != 6 {
 		t.Fatalf("settings should be fetched once per zone, got %d", fake.Calls["settings"])
 	}
 }

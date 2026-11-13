@@ -36,6 +36,15 @@ type Config struct {
 	AccountMetrics bool
 	TunnelMetrics  bool
 
+	HostMetrics      bool
+	HostExactStatus  bool
+	TopHosts         int
+	AdaptiveWindow   time.Duration
+	AdaptiveDelay    time.Duration
+	ZeroTrustMetrics bool
+	DevicesInterval  time.Duration
+	CertMetrics      bool
+
 	LogLevel  string
 	LogFormat string
 
@@ -44,9 +53,10 @@ type Config struct {
 
 // String renders the configuration without the API token.
 func (c Config) String() string {
-	return fmt.Sprintf("api_url=%s zones=%d exclude_zones=%d accounts=%d listen=%s metrics_path=%s scrape_interval=%s hourly_delay=%s concurrency=%d top_countries=%d firewall_events=%t account_metrics=%t tunnel_metrics=%t",
+	return fmt.Sprintf("api_url=%s zones=%d exclude_zones=%d accounts=%d listen=%s metrics_path=%s scrape_interval=%s hourly_delay=%s concurrency=%d top_countries=%d firewall_events=%t account_metrics=%t tunnel_metrics=%t host_metrics=%t top_hosts=%d adaptive_window=%s adaptive_delay=%s zerotrust_metrics=%t devices_interval=%s cert_metrics=%t",
 		c.APIURL, len(c.Zones), len(c.ExcludeZones), len(c.Accounts), c.Listen, c.MetricsPath,
-		c.ScrapeInterval, c.HourlyDelay, c.Concurrency, c.TopCountries, c.FirewallEvents, c.AccountMetrics, c.TunnelMetrics)
+		c.ScrapeInterval, c.HourlyDelay, c.Concurrency, c.TopCountries, c.FirewallEvents, c.AccountMetrics, c.TunnelMetrics,
+		c.HostMetrics, c.TopHosts, c.AdaptiveWindow, c.AdaptiveDelay, c.ZeroTrustMetrics, c.DevicesInterval, c.CertMetrics)
 }
 
 // LookupFunc mirrors os.LookupEnv so tests can inject an environment.
@@ -75,6 +85,9 @@ func Load(args []string, env LookupFunc, out io.Writer) (Config, error) {
 		concurrency, topCountries          string
 		firewall, accountMetrics           string
 		tunnelMetrics                      string
+		hostMetrics, hostExact, topHosts   string
+		adaptiveWindow, adaptiveDelay      string
+		ztMetrics, devicesInterval, certs  string
 	)
 
 	// The token default is not taken from the environment here so that
@@ -94,6 +107,14 @@ func Load(args []string, env LookupFunc, out io.Writer) (Config, error) {
 	fs.StringVar(&firewall, "firewall-events", get("CF_FIREWALL_EVENTS", "true"), "collect firewall (security) events (env CF_FIREWALL_EVENTS)")
 	fs.StringVar(&accountMetrics, "account-metrics", get("CF_ACCOUNT_METRICS", "true"), "collect account-level HTTP metrics (env CF_ACCOUNT_METRICS)")
 	fs.StringVar(&tunnelMetrics, "tunnel-metrics", get("CF_TUNNEL_METRICS", "true"), "collect Cloudflare Tunnel health metrics (env CF_TUNNEL_METRICS)")
+	fs.StringVar(&hostMetrics, "host-metrics", get("CF_HOST_METRICS", "true"), "collect per-host traffic from httpRequestsAdaptiveGroups (env CF_HOST_METRICS)")
+	fs.StringVar(&hostExact, "host-exact-status", get("CF_HOST_EXACT_STATUS", "false"), "also export per-host requests by exact status code (env CF_HOST_EXACT_STATUS)")
+	fs.StringVar(&topHosts, "top-hosts", get("CF_TOP_HOSTS", "50"), "hosts exported per zone; the rest are summed as host=\"other\"; 0 = no limit (env CF_TOP_HOSTS)")
+	fs.StringVar(&adaptiveWindow, "adaptive-window", get("CF_ADAPTIVE_WINDOW", "5m"), "length of the rolling window for near-real-time datasets (env CF_ADAPTIVE_WINDOW)")
+	fs.StringVar(&adaptiveDelay, "adaptive-delay", get("CF_ADAPTIVE_DELAY", "3m"), "how far back the rolling window ends, to let data arrive (env CF_ADAPTIVE_DELAY)")
+	fs.StringVar(&ztMetrics, "zerotrust-metrics", get("CF_ZEROTRUST_METRICS", "true"), "collect Zero Trust metrics: service tokens, devices, Gateway DNS, Access logins (env CF_ZEROTRUST_METRICS)")
+	fs.StringVar(&devicesInterval, "devices-interval", get("CF_DEVICES_INTERVAL", "1h"), "how often to re-read the WARP device list (env CF_DEVICES_INTERVAL)")
+	fs.StringVar(&certs, "cert-metrics", get("CF_CERT_METRICS", "true"), "collect edge certificate pack metrics (env CF_CERT_METRICS)")
 	fs.StringVar(&c.LogLevel, "log-level", get("LOG_LEVEL", "info"), "log level: debug, info, warn, error (env LOG_LEVEL)")
 	fs.StringVar(&c.LogFormat, "log-format", get("LOG_FORMAT", "text"), "log format: text or json (env LOG_FORMAT)")
 	fs.BoolVar(&c.ShowVersion, "version", false, "print version and exit")
@@ -146,6 +167,29 @@ func Load(args []string, env LookupFunc, out io.Writer) (Config, error) {
 	}
 	if c.TunnelMetrics, err = strconv.ParseBool(tunnelMetrics); err != nil {
 		errs = append(errs, fmt.Errorf("CF_TUNNEL_METRICS: invalid boolean %q", tunnelMetrics))
+	}
+	parseBool := func(name, v string, dst *bool) {
+		b, err := strconv.ParseBool(v)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("%s: invalid boolean %q", name, v))
+		}
+		*dst = b
+	}
+	parseBool("CF_HOST_METRICS", hostMetrics, &c.HostMetrics)
+	parseBool("CF_HOST_EXACT_STATUS", hostExact, &c.HostExactStatus)
+	parseBool("CF_ZEROTRUST_METRICS", ztMetrics, &c.ZeroTrustMetrics)
+	parseBool("CF_CERT_METRICS", certs, &c.CertMetrics)
+	if c.TopHosts, err = strconv.Atoi(topHosts); err != nil || c.TopHosts < 0 {
+		errs = append(errs, fmt.Errorf("CF_TOP_HOSTS: must be a non-negative integer, got %q", topHosts))
+	}
+	if c.AdaptiveWindow, err = parsePositiveDuration("CF_ADAPTIVE_WINDOW", adaptiveWindow); err != nil {
+		errs = append(errs, err)
+	}
+	if c.AdaptiveDelay, err = time.ParseDuration(adaptiveDelay); err != nil || c.AdaptiveDelay < 0 {
+		errs = append(errs, fmt.Errorf("CF_ADAPTIVE_DELAY: invalid duration %q", adaptiveDelay))
+	}
+	if c.DevicesInterval, err = parsePositiveDuration("CF_DEVICES_INTERVAL", devicesInterval); err != nil {
+		errs = append(errs, err)
 	}
 	if !strings.HasPrefix(c.MetricsPath, "/") {
 		errs = append(errs, fmt.Errorf("METRICS_PATH must start with '/', got %q", c.MetricsPath))

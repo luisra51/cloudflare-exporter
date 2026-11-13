@@ -149,6 +149,9 @@ func (c *Collector) publish() {
 			}
 		}
 
+		c.publishHosts(g, z.Name, acc, zs)
+		publishCerts(g, z.Name, acc, zs)
+
 		if fw := zs.fw; fw != nil {
 			g(descFWWindow, float64(zs.fwWindow.Unix()), z.Name, acc)
 			for k, v := range fw.Counts {
@@ -175,6 +178,14 @@ func (c *Collector) publish() {
 		g(descAccCachedRequests, as.stats.CachedRequests, name, as.id)
 		g(descAccBytes, as.stats.Bytes, name, as.id)
 		g(descAccCachedBytes, as.stats.CachedBytes, name, as.id)
+	}
+
+	for accID, st := range c.zt {
+		acc := c.accountNames[accID]
+		if acc == "" {
+			acc = accID
+		}
+		publishZeroTrust(g, acc, st)
 	}
 
 	for accID, states := range c.tunnels {

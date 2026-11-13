@@ -14,6 +14,7 @@ const (
 	DatasetFirewallGroups  = "firewallEventsAdaptiveGroups"
 	DatasetAccountOverview = "httpRequestsOverviewAdaptiveGroups"
 	DatasetSettings        = "settings"
+	DatasetHTTPAdaptive    = "httpRequestsAdaptiveGroups"
 )
 
 // ---------------------------------------------------------- settings ----
@@ -25,6 +26,7 @@ const zoneSettingsQuery = `query ZoneSettings($zoneTag: String!) {
         httpRequests1hGroups { enabled }
         firewallEventsAdaptive { enabled maxPageSize maxDuration notOlderThan }
         firewallEventsAdaptiveGroups { enabled maxPageSize maxDuration notOlderThan }
+        httpRequestsAdaptiveGroups { enabled maxPageSize maxDuration notOlderThan maxNumberOfFields }
       }
     }
   }
@@ -36,6 +38,10 @@ type NodeSettings struct {
 	MaxPageSize  int   `json:"maxPageSize"`
 	MaxDuration  int64 `json:"maxDuration"`  // seconds
 	NotOlderThan int64 `json:"notOlderThan"` // seconds
+	MaxFields    int   `json:"maxNumberOfFields"`
+	// AvailableFields lists the fields the requester may use, when
+	// Cloudflare reports them (nested fields as paths, e.g. "sum_requests").
+	AvailableFields []string `json:"availableFields"`
 }
 
 // ZoneSettings describes which datasets a zone may query.
@@ -43,6 +49,7 @@ type ZoneSettings struct {
 	HTTP1h         NodeSettings `json:"httpRequests1hGroups"`
 	FirewallRaw    NodeSettings `json:"firewallEventsAdaptive"`
 	FirewallGroups NodeSettings `json:"firewallEventsAdaptiveGroups"`
+	HTTPAdaptive   NodeSettings `json:"httpRequestsAdaptiveGroups"`
 }
 
 // DefaultZoneSettings is what the exporter assumes for a Free-plan zone
@@ -51,6 +58,8 @@ func DefaultZoneSettings() ZoneSettings {
 	return ZoneSettings{
 		HTTP1h:      NodeSettings{Enabled: true},
 		FirewallRaw: NodeSettings{Enabled: true, MaxPageSize: 10000, MaxDuration: 86400},
+		// Verified to be readable by Free-plan zones.
+		HTTPAdaptive: NodeSettings{Enabled: true, MaxPageSize: 10000},
 	}
 }
 
@@ -69,7 +78,15 @@ func (c *Client) ZoneSettings(ctx context.Context, zoneTag string) (ZoneSettings
 	if len(out.Viewer.Zones) == 0 {
 		return ZoneSettings{}, errors.New("settings: zone not returned")
 	}
-	return out.Viewer.Zones[0].Settings, nil
+	s := out.Viewer.Zones[0].Settings
+	if s.HTTPAdaptive.Enabled {
+		// Asked separately so that a schema difference here cannot break
+		// the main settings query; unknown fields simply stay unused.
+		if fields, err := c.availableFields(ctx, zoneTag, DatasetHTTPAdaptive); err == nil {
+			s.HTTPAdaptive.AvailableFields = fields
+		}
+	}
+	return s, nil
 }
 
 // --------------------------------------------------- httpRequests1hGroups --

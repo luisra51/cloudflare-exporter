@@ -55,6 +55,41 @@ type Fake struct {
 	ConnectionsFail bool
 	// RESTCalls counts REST calls by path.
 	RESTCalls map[string]int
+
+	// ExtraHosts adds that many one-request hosts to per-host traffic.
+	ExtraHosts int
+	// RefuseOptionalHostFields makes the per-host query fail when it asks
+	// for origin status, bytes or origin time.
+	RefuseOptionalHostFields bool
+	// ZeroTrustForbidden makes Zero Trust REST and GraphQL calls fail as
+	// unauthorized.
+	ZeroTrustForbidden bool
+	// CertsForbidden makes certificate pack calls return 403.
+	CertsForbidden bool
+	// DevicesMaxPerPage, when set, rejects larger device pages with 400.
+	DevicesMaxPerPage int
+	// Devices returned by /accounts/{id}/devices.
+	Devices []map[string]any
+}
+
+// Synthetic dates for Zero Trust and certificate fixtures.
+const (
+	CertExpiryEarliest = "2027-01-05T00:00:00Z"
+	TokenExpiry        = "2027-02-01T00:00:00Z" // #nosec G101 -- a date, not a credential
+	TokenLastSeen      = "2026-02-28T09:00:00Z" // #nosec G101 -- a date, not a credential
+)
+
+func defaultDevices() []map[string]any {
+	d := func(t string, lastSeen any) map[string]any {
+		return map[string]any{"id": "dev", "device_type": t, "last_seen": lastSeen, "name": "device", "ip": "192.0.2.1"}
+	}
+	return []map[string]any{
+		d("windows", "2026-03-01T10:00:00Z"), // < 24h before 2026-03-01T12:07Z
+		d("windows", "2026-02-27T10:00:00Z"), // < 7d
+		d("mac", "2026-02-10T10:00:00Z"),     // < 30d
+		d("linux", "2025-06-01T10:00:00Z"),   // older
+		d("ios", nil),                        // never
+	}
 }
 
 // Synthetic tunnel identifiers.
@@ -120,6 +155,7 @@ func New() *Fake {
 		Tunnels:               tunnels,
 		Connectors:            connectors,
 		RESTCalls:             map[string]int{},
+		Devices:               defaultDevices(),
 		FailDatasets:          map[string]bool{},
 		Calls:                 map[string]int{},
 	}
@@ -148,6 +184,8 @@ func (f *Fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		f.graphql(w, r)
 	case path == "/zones":
 		f.listZones(w, r)
+	case strings.HasPrefix(path, "/zones/") && strings.HasSuffix(path, "/ssl/certificate_packs"):
+		f.certPacks(w, r)
 	case strings.HasPrefix(path, "/zones/"):
 		f.getZone(w, strings.TrimPrefix(path, "/zones/"))
 	case strings.HasPrefix(path, "/accounts/"):
@@ -243,7 +281,7 @@ func (f *Fake) graphql(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	dataset := ""
-	for _, ds := range []string{"settings", "httpRequests1hGroups", "firewallEventsAdaptiveGroups", "firewallEventsAdaptive", "httpRequestsOverviewAdaptiveGroups"} {
+	for _, ds := range []string{"settings", "httpRequests1hGroups", "firewallEventsAdaptiveGroups", "firewallEventsAdaptive", "httpRequestsOverviewAdaptiveGroups", "httpRequestsAdaptiveGroups", "gatewayResolverQueriesAdaptiveGroups", "accessLoginRequestsAdaptiveGroups"} {
 		if strings.Contains(req.Query, ds+"(") || strings.Contains(req.Query, ds+" {") {
 			dataset = ds
 			break
@@ -274,7 +312,16 @@ func (f *Fake) graphql(w http.ResponseWriter, r *http.Request) {
 
 	switch dataset {
 	case "settings":
+		if strings.Contains(req.Query, "availableFields") {
+			fields := []string{"count", "clientRequestHTTPHost", "edgeResponseStatus"}
+			if paid {
+				fields = append(fields, "sum_edgeResponseBytes", "originResponseStatus", "avg_originResponseDurationMs")
+			}
+			zone("settings", map[string]any{"httpRequestsAdaptiveGroups": map[string]any{"availableFields": fields}})
+			return
+		}
 		zone("settings", map[string]any{
+			"httpRequestsAdaptiveGroups":   map[string]any{"enabled": true, "maxPageSize": 10000, "maxDuration": 2592000, "maxNumberOfFields": 40, "notOlderThan": 2678400},
 			"httpRequests1hGroups":         map[string]any{"enabled": true},
 			"firewallEventsAdaptive":       map[string]any{"enabled": true, "maxPageSize": 10000, "maxDuration": 86400, "notOlderThan": 2678400},
 			"firewallEventsAdaptiveGroups": map[string]any{"enabled": paid, "maxPageSize": 10000, "maxDuration": 86400, "notOlderThan": 2678400},
@@ -340,6 +387,30 @@ func (f *Fake) graphql(w http.ResponseWriter, r *http.Request) {
 			events = []any{}
 		}
 		zone("firewallEventsAdaptive", events)
+	case "httpRequestsAdaptiveGroups":
+		f.hostGroups(w, req.Query, zone)
+	case "gatewayResolverQueriesAdaptiveGroups", "accessLoginRequestsAdaptiveGroups":
+		f.mu.Lock()
+		forbidden := f.ZeroTrustForbidden
+		f.mu.Unlock()
+		if forbidden {
+			writeJSON(w, 200, map[string]any{"data": nil, "errors": []any{map[string]any{"message": "not authorized for that account"}}})
+			return
+		}
+		var groups []any
+		if dataset == "gatewayResolverQueriesAdaptiveGroups" {
+			groups = []any{
+				map[string]any{"count": 120, "dimensions": map[string]any{"resolverDecision": 5}},
+				map[string]any{"count": 15, "dimensions": map[string]any{"resolverDecision": 9}},
+				map[string]any{"count": 1, "dimensions": map[string]any{"resolverDecision": 99}},
+			}
+		} else {
+			groups = []any{
+				map[string]any{"count": 40, "dimensions": map[string]any{"isSuccessfulLogin": 1}},
+				map[string]any{"count": 3, "dimensions": map[string]any{"isSuccessfulLogin": 0}},
+			}
+		}
+		writeJSON(w, 200, map[string]any{"data": map[string]any{"viewer": map[string]any{"accounts": []any{map[string]any{dataset: groups}}}}})
 	case "httpRequestsOverviewAdaptiveGroups":
 		writeJSON(w, 200, map[string]any{"data": map[string]any{"viewer": map[string]any{"accounts": []any{map[string]any{
 			"httpRequestsOverviewAdaptiveGroups": []any{map[string]any{"sum": map[string]any{"requests": 3000, "cachedRequests": 1800, "bytes": 15000000, "cachedBytes": 9000000}}},
@@ -356,6 +427,10 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 }
 
 func (f *Fake) tunnelRoutes(w http.ResponseWriter, r *http.Request, parts []string) {
+	if (len(parts) == 4 && parts[2] == "access" && parts[3] == "service_tokens") || (len(parts) == 3 && parts[2] == "devices") {
+		f.zeroTrustRoutes(w, r, parts)
+		return
+	}
 	f.mu.Lock()
 	forbidden, legacy, connFail := f.TunnelsForbidden, f.TunnelsLegacyOnly, f.ConnectionsFail
 	tunnels, connectors := f.Tunnels, f.Connectors
@@ -410,4 +485,124 @@ func (f *Fake) tunnelRoutes(w http.ResponseWriter, r *http.Request, parts []stri
 	default:
 		http.NotFound(w, r)
 	}
+}
+
+func (f *Fake) hostGroups(w http.ResponseWriter, query string, zone func(string, any)) {
+	f.mu.Lock()
+	refuse, extra := f.RefuseOptionalHostFields, f.ExtraHosts
+	f.mu.Unlock()
+	origin := strings.Contains(query, "originResponseStatus")
+	bytes := strings.Contains(query, "edgeResponseBytes")
+	dur := strings.Contains(query, "originResponseDurationMs")
+	if refuse && (origin || bytes || dur) {
+		writeJSON(w, 200, map[string]any{"data": nil, "errors": []any{map[string]any{"message": "unknown field originResponseStatus"}}})
+		return
+	}
+	limit := 10000
+	if m := limitRE.FindStringSubmatch(query); m != nil {
+		limit, _ = strconv.Atoi(m[1])
+	}
+	type row struct {
+		host         string
+		edge, origin int
+		count        float64
+		ms           float64
+	}
+	rows := []row{
+		{"www.example.com", 200, 200, 500, 80},
+		{"www.example.com", 404, 404, 20, 20},
+		{"www.example.com", 503, 503, 5, 3000},
+		{"api.example.com", 200, 200, 300, 120},
+		{"api.example.com", 500, 500, 10, 900},
+		{"static.example.com", 200, 0, 50, 0},
+	}
+	for i := 0; i < extra; i++ {
+		rows = append(rows, row{fmt.Sprintf("h%d.example.com", i), 200, 200, 1, 10})
+	}
+	var groups []any
+	for _, r := range rows {
+		if len(groups) >= limit {
+			break
+		}
+		dims := map[string]any{"clientRequestHTTPHost": r.host, "edgeResponseStatus": r.edge}
+		if origin {
+			dims["originResponseStatus"] = r.origin
+		}
+		g := map[string]any{"count": r.count, "dimensions": dims}
+		if bytes {
+			g["sum"] = map[string]any{"edgeResponseBytes": r.count * 1000}
+		}
+		if dur {
+			g["avg"] = map[string]any{"originResponseDurationMs": r.ms}
+		}
+		groups = append(groups, g)
+	}
+	if groups == nil {
+		groups = []any{}
+	}
+	zone("httpRequestsAdaptiveGroups", groups)
+}
+
+func (f *Fake) certPacks(w http.ResponseWriter, r *http.Request) {
+	f.mu.Lock()
+	forbidden := f.CertsForbidden
+	f.mu.Unlock()
+	if forbidden {
+		writeJSON(w, 403, map[string]any{"success": false, "errors": []any{map[string]any{"code": 10000, "message": "Authentication error"}}})
+		return
+	}
+	if r.URL.Query().Get("status") != "all" {
+		writeJSON(w, 400, map[string]any{"success": false, "errors": []any{map[string]any{"code": 1000, "message": "expected status=all"}}})
+		return
+	}
+	packs := []any{
+		map[string]any{"id": "pack-universal-1", "type": "universal", "status": "active", "certificate_authority": "google",
+			"hosts": []any{"example.com", "*.example.com"}, "certificates": []any{
+				map[string]any{"id": "cert-1", "expires_on": "2027-01-10T00:00:00Z", "status": "active"},
+				map[string]any{"id": "cert-2", "expires_on": CertExpiryEarliest, "status": "active"},
+			}},
+		map[string]any{"id": "pack-advanced-1", "type": "advanced", "status": "pending_validation",
+			"hosts": []any{"shop.example.com"}, "certificates": []any{}},
+	}
+	writeJSON(w, 200, map[string]any{"success": true, "errors": []any{}, "result": packs,
+		"result_info": map[string]any{"page": 1, "per_page": 50, "count": len(packs), "total_count": len(packs), "total_pages": 1}})
+}
+
+func (f *Fake) zeroTrustRoutes(w http.ResponseWriter, r *http.Request, parts []string) {
+	f.mu.Lock()
+	forbidden, maxPer, devices := f.ZeroTrustForbidden, f.DevicesMaxPerPage, f.Devices
+	f.mu.Unlock()
+	if forbidden {
+		writeJSON(w, 403, map[string]any{"success": false, "errors": []any{map[string]any{"code": 10000, "message": "Authentication error"}}})
+		return
+	}
+	if parts[2] == "access" {
+		tokens := []any{
+			map[string]any{"id": "tok-1", "name": "ci-deploy", "client_id": "secret-client-id.access", "expires_at": TokenExpiry, "last_seen_at": TokenLastSeen, "duration": "8760h"},
+			map[string]any{"id": "tok-2", "name": "legacy-bot", "client_id": "secret-client-id-2.access", "expires_at": "2125-01-01T00:00:00Z", "duration": "forever"},
+		}
+		writeJSON(w, 200, map[string]any{"success": true, "errors": []any{}, "result": tokens,
+			"result_info": map[string]any{"page": 1, "per_page": 1000, "count": len(tokens), "total_count": len(tokens), "total_pages": 1}})
+		return
+	}
+	perPage, _ := strconv.Atoi(r.URL.Query().Get("per_page"))
+	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	if perPage < 1 {
+		perPage = 20
+	}
+	if maxPer > 0 && perPage > maxPer {
+		writeJSON(w, 400, map[string]any{"success": false, "errors": []any{map[string]any{"code": 1001, "message": "per_page too large"}}})
+		return
+	}
+	if page < 1 {
+		page = 1
+	}
+	lo := min((page-1)*perPage, len(devices))
+	hi := min(lo+perPage, len(devices))
+	result := devices[lo:hi]
+	if result == nil {
+		result = []map[string]any{}
+	}
+	writeJSON(w, 200, map[string]any{"success": true, "errors": []any{}, "result": result,
+		"result_info": map[string]any{"page": page, "per_page": perPage, "count": hi - lo, "total_count": len(devices)}})
 }

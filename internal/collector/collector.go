@@ -26,6 +26,12 @@ type API interface {
 	ZoneFirewallEvents(ctx context.Context, zoneTag string, start, end time.Time, s cloudflare.ZoneSettings) (cloudflare.FirewallStats, error)
 	AccountHTTPOverview(ctx context.Context, accountTag string, start, end time.Time) (cloudflare.AccountStats, error)
 	ListTunnels(ctx context.Context, accountID string) ([]cloudflare.Tunnel, error)
+	ZoneHostTraffic(ctx context.Context, zoneTag string, start, end time.Time, ns cloudflare.NodeSettings) (cloudflare.HostStats, error)
+	CertificatePacks(ctx context.Context, zoneID string) ([]cloudflare.CertificatePack, error)
+	ServiceTokens(ctx context.Context, accountID string) ([]cloudflare.ServiceToken, error)
+	Devices(ctx context.Context, accountID string, now time.Time) (cloudflare.DeviceSummary, error)
+	GatewayDNSQueries(ctx context.Context, accountID string, start, end time.Time) (map[string]float64, error)
+	AccessLogins(ctx context.Context, accountID string, start, end time.Time) (map[string]float64, error)
 	TunnelConnectors(ctx context.Context, accountID string, t cloudflare.Tunnel) ([]cloudflare.Connector, error)
 }
 
@@ -40,8 +46,20 @@ type Options struct {
 	FirewallEvents bool
 	AccountMetrics bool
 	TunnelMetrics  bool
-	SettingsTTL    time.Duration // default 6h
-	Now            func() time.Time
+
+	HostMetrics     bool
+	HostExactStatus bool
+	TopHosts        int
+	AdaptiveWindow  time.Duration
+	AdaptiveDelay   time.Duration
+
+	ZeroTrustMetrics bool
+	DevicesInterval  time.Duration
+
+	CertMetrics bool
+
+	SettingsTTL time.Duration // default 6h
+	Now         func() time.Time
 }
 
 // Dataset names used in self-metrics labels.
@@ -73,6 +91,11 @@ type zoneState struct {
 	httpWindow time.Time
 	fw         *cloudflare.FirewallStats
 	fwWindow   time.Time
+
+	hosts       *cloudflare.HostStats
+	hostsWindow [2]time.Time
+	certs       []cloudflare.CertificatePack
+	certsOK     bool
 }
 
 type accountState struct {
@@ -93,6 +116,8 @@ type Collector struct {
 	accountNames map[string]string
 	tunnels      map[string][]tunnelState // by account id
 	tunnelWarned map[string]bool
+	zt           map[string]*ztState // by account id
+	warned       map[string]bool
 	settings     map[string]settingsEntry
 	statuses     map[statusKey]*status
 	lastRun      time.Time
@@ -109,6 +134,12 @@ func New(api API, opts Options, log *slog.Logger) *Collector {
 	if opts.Now == nil {
 		opts.Now = time.Now
 	}
+	if opts.AdaptiveWindow <= 0 {
+		opts.AdaptiveWindow = 5 * time.Minute
+	}
+	if opts.DevicesInterval <= 0 {
+		opts.DevicesInterval = time.Hour
+	}
 	if opts.SettingsTTL <= 0 {
 		opts.SettingsTTL = 6 * time.Hour
 	}
@@ -121,6 +152,8 @@ func New(api API, opts Options, log *slog.Logger) *Collector {
 		accountNames: map[string]string{},
 		tunnels:      map[string][]tunnelState{},
 		tunnelWarned: map[string]bool{},
+		zt:           map[string]*ztState{},
+		warned:       map[string]bool{},
 		settings:     map[string]settingsEntry{},
 		statuses:     map[statusKey]*status{},
 		duration: prometheus.NewGauge(prometheus.GaugeOpts{
@@ -225,13 +258,22 @@ func (c *Collector) CollectOnce(ctx context.Context) {
 			}
 		}(z)
 	}
-	if c.opts.AccountMetrics || c.opts.TunnelMetrics {
+	if c.opts.AccountMetrics || c.opts.TunnelMetrics || c.opts.ZeroTrustMetrics {
 		for _, id := range c.accountIDs(ctx, zones) {
 			if c.opts.AccountMetrics {
 				wg.Add(1)
 				go func(id string) {
 					defer wg.Done()
 					if !c.collectAccount(ctx, id, start, end) {
+						failed.Add(1)
+					}
+				}(id)
+			}
+			if c.opts.ZeroTrustMetrics {
+				wg.Add(1)
+				go func(id string) {
+					defer wg.Done()
+					if !c.collectZeroTrust(ctx, id) {
 						failed.Add(1)
 					}
 				}(id)
@@ -358,6 +400,13 @@ func (c *Collector) collectZone(ctx context.Context, z cloudflare.Zone, start, e
 		}
 	}
 
+	if c.opts.HostMetrics && !c.collectHosts(ctx, z, s) {
+		ok = false
+	}
+	if c.opts.CertMetrics && !c.collectCerts(ctx, z) {
+		ok = false
+	}
+
 	if c.opts.FirewallEvents {
 		st, err := c.api.ZoneFirewallEvents(ctx, z.ID, start, end, s)
 		switch {
@@ -411,6 +460,11 @@ func (c *Collector) accountIDs(ctx context.Context, zones []cloudflare.Zone) []s
 		if !slices.Contains(ids, id) {
 			delete(c.accounts, id)
 			c.dropStatuses("account", id)
+		}
+	}
+	for id := range c.zt {
+		if !slices.Contains(ids, id) {
+			delete(c.zt, id)
 		}
 	}
 	for id := range c.tunnels {

@@ -17,7 +17,7 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue?style=for-the-badge)](LICENSE)
 [![Multi-arch](https://img.shields.io/badge/arch-amd64%20%7C%20arm64-555555?style=for-the-badge&logo=linux)](https://hub.docker.com/r/luisra51/cloudflare-exporter/tags)
 
-> 📈 **Traffic, status codes, security events and tunnel health for every zone and account your token can see, Free plan included.**
+> 📈 **Traffic per zone and per host, security events, edge certificates, tunnels and Zero Trust for every zone and account your token can see, Free plan included.**
 
 ## 🤔 Why another Cloudflare exporter?
 
@@ -27,24 +27,31 @@ and Cloudflare's own exporter, skip zones on the Free plan. They rely on
 GraphQL datasets (for example `httpRequests1mGroups` or
 `firewallEventsAdaptiveGroups`) that Free zones cannot query. Both are good
 tools for paid plans. This exporter covers the case they leave out: it reads
-the datasets that Free zones *can* query, and switches to the richer ones when
-a zone's plan allows it.
+the datasets that Free zones *can* query (`httpRequests1hGroups`,
+`httpRequestsAdaptiveGroups`, `firewallEventsAdaptive`), asks Cloudflare which
+fields each zone may use, and adds the richer ones when a zone's plan allows it.
 
 | On a **Free-plan** zone | cloudflare-exporter | Exporters that skip Free zones |
 |---|:---:|:---:|
 | HTTP traffic (requests, bytes, cache, page views, visitors) | ✅ | ❌ zone skipped |
 | Requests by HTTP status code | ✅ | ❌ zone skipped |
+| Per-host requests by status class, near real time | ✅ | ❌ zone skipped |
+| Edge certificate expiry | ✅ | varies |
 | Security (firewall) events by action and source | ✅ | ❌ zone skipped |
 | Cloudflare Tunnel health (status, connections, connectors) | ✅ | varies |
+| Zero Trust: service token expiry, WARP devices, Gateway DNS, Access logins | ✅ | varies |
 | Multi-arch image (amd64 + arm64) | ✅ | varies |
 | Background collection (scrapes never call the API) | ✅ | varies |
 
 ## ✨ Features
 
-- **🆓 Free plan first**: HTTP traffic from `httpRequests1hGroups` and security events from `firewallEventsAdaptive`, both readable by Free zones
-- **🔍 Plan-aware**: reads Cloudflare's GraphQL `settings` node per zone and uses `firewallEventsAdaptiveGroups` automatically when the plan allows it
+- **🆓 Free plan first**: HTTP traffic from `httpRequests1hGroups`, per-host traffic from `httpRequestsAdaptiveGroups` and security events from `firewallEventsAdaptive`, all readable by Free zones
+- **🔍 Plan-aware**: reads Cloudflare's GraphQL `settings` node per zone (enabled datasets, page sizes, available fields) and uses `firewallEventsAdaptiveGroups`, origin status, bytes and origin response time automatically when the zone may query them
 - **🌐 Auto-discovery**: collects every zone the token can see, or an allowlist (`CF_ZONES`), minus exclusions (`CF_EXCLUDE_ZONES`)
 - **🏢 Account metrics**: account-wide traffic from `httpRequestsOverviewAdaptiveGroups`
+- **🎯 Per-host traffic**: requests per hostname and status class over a rolling 5-minute window, so you can alert on one host's 5xx rate within minutes; top N hosts plus `other`
+- **🔒 Edge certificates**: earliest expiry and status of every certificate pack (Universal SSL included)
+- **🛡️ Zero Trust**: Access service token expiry, WARP device counts by last-seen age and OS, Gateway DNS queries by resolver decision, Access logins by result
 - **🚇 Tunnels**: status, edge connections per data center, connectors and their `cloudflared` versions for Cloudflare Tunnels and WARP Connectors (available on every plan)
 - **⚡ Background collection**: Cloudflare is queried every `SCRAPE_INTERVAL`; `/metrics` serves the cache, so scrapes are instant and never spend API quota
 - **🧮 Bounded cardinality**: countries capped to a top N plus `other`; status, HTTP version, action and source are small enumerations
@@ -130,6 +137,9 @@ The exporter only needs **read** access.
    | Account | **Account Analytics** | account-wide traffic |
    | Account | **Account Settings** | account name |
    | Account | **Cloudflare Tunnel** | tunnel metrics (optional) |
+   | Zone | **SSL and Certificates** | edge certificate metrics (optional) |
+   | Account | **Access: Service Tokens** | service token expiry (optional) |
+   | Account | **Zero Trust** | WARP device counts (optional) |
 
 4. Under **Zone Resources** and **Account Resources**, include only what you want to monitor.
 5. Create the token and pass it as `CF_API_TOKEN`.
@@ -138,6 +148,20 @@ Without the account permissions, set `CF_ACCOUNT_METRICS=false`. The
 Cloudflare Tunnel permission is only needed for tunnel metrics: without it the
 exporter logs one warning, reports `cloudflare_exporter_up{dataset="tunnels"} 0`
 and keeps collecting everything else (or set `CF_TUNNEL_METRICS=false`).
+
+Every optional group works the same way: a missing permission produces **one**
+warning naming it, `cloudflare_exporter_up{dataset="..."} 0`, and no effect on
+the other metrics.
+
+| Feature group | Flag | Permissions (all Read) | `dataset` in `cloudflare_exporter_up` |
+|---|---|---|---|
+| Per-host traffic | `CF_HOST_METRICS` | Zone → Analytics | `httpRequestsAdaptiveGroups` |
+| Edge certificates | `CF_CERT_METRICS` | Zone → SSL and Certificates | `certificate_packs` |
+| Tunnels | `CF_TUNNEL_METRICS` | Account → Cloudflare Tunnel | `tunnels`, `tunnel_connectors` |
+| Service tokens | `CF_ZEROTRUST_METRICS` | Account → Access: Service Tokens | `access_service_tokens` |
+| WARP devices | `CF_ZEROTRUST_METRICS` | Account → Zero Trust | `devices` |
+| Gateway DNS | `CF_ZEROTRUST_METRICS` | Account → Account Analytics (Gateway in use) | `gatewayResolverQueriesAdaptiveGroups` |
+| Access logins | `CF_ZEROTRUST_METRICS` | Account → Account Analytics (Access in use) | `accessLoginRequestsAdaptiveGroups` |
 
 ## ⚙️ Configuration
 
@@ -158,6 +182,14 @@ environment variable for the token, since flags are visible in the process list.
 | `CF_FIREWALL_EVENTS` | `--firewall-events` | `true` | Collect security events |
 | `CF_ACCOUNT_METRICS` | `--account-metrics` | `true` | Collect account-level metrics |
 | `CF_TUNNEL_METRICS` | `--tunnel-metrics` | `true` | Collect Cloudflare Tunnel health metrics |
+| `CF_HOST_METRICS` | `--host-metrics` | `true` | Collect per-host traffic (`httpRequestsAdaptiveGroups`) |
+| `CF_HOST_EXACT_STATUS` | `--host-exact-status` | `false` | Also export per-host requests by exact status code |
+| `CF_TOP_HOSTS` | `--top-hosts` | `50` | Hosts per zone; the rest are summed as `host="other"`; `0` = no limit |
+| `CF_ADAPTIVE_WINDOW` | `--adaptive-window` | `5m` | Length of the rolling window for near-real-time data |
+| `CF_ADAPTIVE_DELAY` | `--adaptive-delay` | `3m` | How long ago the rolling window ends, to let data arrive |
+| `CF_CERT_METRICS` | `--cert-metrics` | `true` | Collect edge certificate pack metrics |
+| `CF_ZEROTRUST_METRICS` | `--zerotrust-metrics` | `true` | Collect Zero Trust metrics |
+| `CF_DEVICES_INTERVAL` | `--devices-interval` | `1h` | How often to re-read the WARP device list (it can be large) |
 | `CF_CONCURRENCY` | `--concurrency` | `4` | Maximum concurrent Cloudflare API requests |
 | `CF_HTTP_TIMEOUT` | `--http-timeout` | `30s` | Timeout per API request |
 | `CF_API_URL` | `--api-url` | `https://api.cloudflare.com/client/v4` | API base URL (for testing) |
@@ -173,7 +205,7 @@ environment variable for the token, since flags are visible in the process list.
 | `/healthz` | Liveness: always `200` with `{"status":"ok","zone_discovery_succeeded":...,"last_collection":...}` |
 | `/` | Small landing page |
 
-## ⏱️ How hourly data works
+## ⏱️ How hourly and near-real-time data work
 
 - Metrics describe the **last complete hour**, as gauges ("requests in that hour"), not counters.
 - The exporter waits `CF_HOURLY_DELAY` (default `10m`) after an hour ends so
@@ -190,13 +222,26 @@ environment variable for the token, since flags are visible in the process list.
   minute, with a budget of 32 queries per zone and cycle. If that is still not
   enough, `cloudflare_zone_hourly_firewall_events_truncated` is `1` and the
   count is a lower bound.
-- Tunnel metrics are not hourly: they describe the state at the last
-  collection cycle.
+- Tunnel, certificate, service token and device metrics are not hourly: they
+  describe the state at the last collection cycle (devices: at the last
+  `CF_DEVICES_INTERVAL`).
+- Per-host, Gateway DNS and Access login metrics use a **rolling window**
+  instead: `CF_ADAPTIVE_WINDOW` (default 5 minutes) ending `CF_ADAPTIVE_DELAY`
+  (default 3 minutes) ago, aligned to the minute, re-read every cycle. With
+  defaults at 12:10:30 you see 12:02–12:07. Divide by
+  `cloudflare_zone_host_window_seconds` for a per-second rate. Keep
+  `SCRAPE_INTERVAL` at or below the window to avoid gaps.
+- These come from Cloudflare's **adaptive (sampled)** datasets, so counts are
+  Cloudflare's estimates, not exact totals. Low-traffic hosts may show small
+  integer jumps.
 - Requests go through a concurrency limit and are retried on HTTP 429/5xx.
   Cloudflare allows 300 GraphQL queries per 5 minutes per user; with defaults
-  the exporter uses about 2–3 GraphQL queries per zone per cycle, plus one per
-  account. Tunnel metrics use REST calls instead: one list per account and one
-  per tunnel.
+  the exporter uses about 3–4 GraphQL queries per zone per cycle (hourly HTTP,
+  security events, per-host traffic) plus three per account (account traffic,
+  Gateway DNS, Access logins). REST calls (limit: 1,200 per 5 minutes) cover
+  zones, certificate packs (one per zone), tunnels (one list per account plus
+  one per tunnel), service tokens, and devices (pages of 1,000, once per
+  `CF_DEVICES_INTERVAL`). Disable what you don't need if you have many zones.
 
 ## 📊 Metrics
 
@@ -267,12 +312,60 @@ The connector's public origin IP is **never** exported, by design.
 | `cloudflare_tunnel_active_since_timestamp_seconds` | | When the tunnel last became active (absent if never) |
 | `cloudflare_tunnel_inactive_since_timestamp_seconds` | | When the tunnel last became inactive (absent if Cloudflare reports none) |
 
+### Per-host traffic (rolling window, `httpRequestsAdaptiveGroups`)
+
+All with labels `zone` and `account`. `host` is capped by `CF_TOP_HOSTS`,
+the rest summed as `host="other"`. Counts are sampled estimates.
+
+| Metric | Extra labels | Description |
+|---|---|---|
+| `cloudflare_zone_host_window_start_timestamp_seconds` | | Start of the window |
+| `cloudflare_zone_host_window_seconds` | | Length of the window |
+| `cloudflare_zone_host_requests` | `host`, `status_class` | Requests by edge status class (`1xx`…`5xx`, `unknown`) |
+| `cloudflare_zone_host_requests_by_status` | `host`, `status` | Requests by exact edge status (only with `CF_HOST_EXACT_STATUS=true`) |
+| `cloudflare_zone_host_bytes` | `host` | Bytes sent to clients (only if the zone may query `edgeResponseBytes`) |
+| `cloudflare_zone_host_origin_5xx_requests` | `host` | Requests whose origin answered 5xx (only if the zone may query `originResponseStatus`) |
+| `cloudflare_zone_host_origin_response_time_seconds` | `host` | Average origin response time (only if the zone may query `originResponseDurationMs`) |
+| `cloudflare_zone_host_truncated` | | `1` if the query hit the API row limit and counts are a lower bound |
+
+The optional fields are requested only when the zone's `settings` node lists
+them in `availableFields`; if Cloudflare still refuses, the query is retried
+with the base fields.
+
+### Edge certificates (`/zones/{id}/ssl/certificate_packs?status=all`)
+
+| Metric | Labels | Description |
+|---|---|---|
+| `cloudflare_zone_certificate_packs` | `zone`, `account` | Certificate packs of the zone (all statuses) |
+| `cloudflare_zone_certificate_pack_info` | `zone`, `account`, `pack_id`, `type`, `status`, `certificate_authority` | Always `1` |
+| `cloudflare_zone_certificate_pack_active` | `zone`, `account`, `pack_id`, `type` | `1` if the pack status is `active` |
+| `cloudflare_zone_certificate_pack_expiry_timestamp_seconds` | `zone`, `account`, `pack_id`, `type`, `status` | Earliest expiry among the pack's certificates (absent if none reported) |
+
+### Zero Trust
+
+Service tokens and devices are read from the REST API; Gateway DNS and Access
+logins from account-level GraphQL over the rolling window. No per-device data
+and no service token client IDs are exported.
+
+| Metric | Labels | Description |
+|---|---|---|
+| `cloudflare_access_service_tokens` | `account` | Access service tokens |
+| `cloudflare_access_service_token_expiry_timestamp_seconds` | `account`, `name` | Expiry of each token |
+| `cloudflare_access_service_token_last_seen_timestamp_seconds` | `account`, `name` | Last use, when Cloudflare reports it |
+| `cloudflare_zerotrust_devices` | `account` | WARP devices |
+| `cloudflare_zerotrust_devices_by_last_seen` | `account`, `last_seen` | Devices by time since last seen; exclusive buckets `24h`, `7d`, `30d`, `older`, `never` |
+| `cloudflare_zerotrust_devices_by_os` | `account`, `os` | Devices by `device_type` (`windows`, `mac`, `linux`, `android`, `ios`, `chromeos`) |
+| `cloudflare_zerotrust_window_start_timestamp_seconds` | `account` | Start of the Gateway DNS / Access window |
+| `cloudflare_zerotrust_window_seconds` | `account` | Length of that window |
+| `cloudflare_gateway_dns_queries` | `account`, `decision`, `decision_code` | Gateway DNS queries by resolver decision (sampled estimate); `decision` is the documented name (`blockedByCategory`, `allowedOnNoPolicyMatch`, `blockedRule`, ...) or `unknown` |
+| `cloudflare_access_logins` | `account`, `result` | Access login attempts, `success` or `failure` (sampled estimate) |
+
 ### Metadata and exporter health
 
 | Metric | Labels | Description |
 |---|---|---|
 | `cloudflare_zone_info` | `zone`, `zone_id`, `account`, `account_id`, `plan`, `status` | Always `1`; `plan` is `free`, `pro`, `business`, `enterprise`, ... |
-| `cloudflare_exporter_up` | `scope`, `target`, `dataset` | `1` if the last attempt succeeded; `scope` is `zone`, `account` or `exporter`; `dataset` is `zones`, `settings`, `httpRequests1hGroups`, `firewallEvents`, `httpRequestsOverviewAdaptiveGroups`, `tunnels` or `tunnel_connectors` |
+| `cloudflare_exporter_up` | `scope`, `target`, `dataset` | `1` if the last attempt succeeded; `scope` is `zone`, `account` or `exporter`; `dataset` is `zones`, `settings`, `httpRequests1hGroups`, `firewallEvents`, `httpRequestsOverviewAdaptiveGroups`, `tunnels`, `tunnel_connectors`, `httpRequestsAdaptiveGroups`, `certificate_packs`, `access_service_tokens`, `devices`, `gatewayResolverQueriesAdaptiveGroups` or `accessLoginRequestsAdaptiveGroups` |
 | `cloudflare_exporter_last_success_timestamp_seconds` | `scope`, `target`, `dataset` | Time of the last success |
 | `cloudflare_exporter_api_errors_total` | `api`, `operation` | Failed API calls (`api` = `rest` or `graphql`) |
 | `cloudflare_exporter_collections_total` | `result` | Collection cycles: `success`, `partial`, `failure` |
@@ -317,6 +410,30 @@ cloudflare_tunnel_connectors < 2
 # Tunnels whose connectors run different cloudflared versions
 count by (account, tunnel) (count by (account, tunnel, version) (cloudflare_tunnel_connector_info)) > 1
 
+# Hosts with more than 5% 5xx in the last window
+sum by (zone, host) (cloudflare_zone_host_requests{status_class="5xx"})
+  / sum by (zone, host) (cloudflare_zone_host_requests) > 0.05
+
+# Requests per second per host
+sum by (zone, host) (cloudflare_zone_host_requests)
+  / on (zone) group_left cloudflare_zone_host_window_seconds
+
+# Edge certificates expiring within 14 days
+cloudflare_zone_certificate_pack_expiry_timestamp_seconds - time() < 14 * 86400
+
+# Access service tokens expiring within 30 days
+cloudflare_access_service_token_expiry_timestamp_seconds - time() < 30 * 86400
+
+# WARP devices not seen for more than 30 days
+cloudflare_zerotrust_devices_by_last_seen{last_seen="older"}
+
+# Share of blocked Gateway DNS queries
+sum by (account) (cloudflare_gateway_dns_queries{decision=~"blocked.*"})
+  / sum by (account) (cloudflare_gateway_dns_queries)
+
+# Failed Access logins in the last window
+cloudflare_access_logins{result="failure"}
+
 # Requests over the last 24 hours (one sample per hour)
 sum_over_time(cloudflare_zone_hourly_requests{zone="example.com"}[24h:1h])
 ```
@@ -331,6 +448,13 @@ groups:
         expr: time() - cloudflare_exporter_last_success_timestamp_seconds > 3 * 3600
       - alert: CloudflareTunnelDown
         expr: cloudflare_tunnel_up == 0
+        for: 10m
+      - alert: CloudflareCertificateExpiringSoon
+        expr: cloudflare_zone_certificate_pack_expiry_timestamp_seconds - time() < 14 * 86400
+      - alert: CloudflareHostHigh5xx
+        expr: |
+          sum by (zone, host) (cloudflare_zone_host_requests{status_class="5xx"})
+            / sum by (zone, host) (cloudflare_zone_host_requests) > 0.05
         for: 10m
       - alert: CloudflareHigh5xxRatio
         expr: |
