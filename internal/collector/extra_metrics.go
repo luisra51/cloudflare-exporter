@@ -24,7 +24,9 @@ var (
 	descHostOrigin5xx = prometheus.NewDesc("cloudflare_zone_host_origin_5xx_requests",
 		"Requests per host whose origin answered 5xx in the rolling window (sampled estimate). Only when the zone may query originResponseStatus.", hostLabels, nil)
 	descHostOriginTime = prometheus.NewDesc("cloudflare_zone_host_origin_response_time_seconds",
-		"Average origin response time per host in the rolling window. Only when the zone may query originResponseDurationMs.", hostLabels, nil)
+		"Average origin response time per host in the rolling window, over requests that reached the origin. Absent for hosts with no origin requests in the window.", hostLabels, nil)
+	descHostOriginRequests = prometheus.NewDesc("cloudflare_zone_host_origin_requests",
+		"Requests per host that reached the origin (originResponseStatus > 0) in the rolling window (sampled estimate). Only when the zone may query originResponseStatus.", hostLabels, nil)
 	descHostTruncated = prometheus.NewDesc("cloudflare_zone_host_truncated",
 		"1 if the per-host query hit the API row limit and counts are a lower bound.", zoneLabels, nil)
 
@@ -151,6 +153,15 @@ func (c *Collector) publishHosts(g func(*prometheus.Desc, float64, ...string), z
 		}
 		for h, v := range o {
 			g(descHostOrigin5xx, v, zone, acc, h)
+		}
+		reqs := fold(st.OriginRequests)
+		for _, h := range label {
+			if _, ok := reqs[h]; !ok {
+				reqs[h] = 0
+			}
+		}
+		for h, v := range reqs {
+			g(descHostOriginRequests, v, zone, acc, h)
 		}
 	}
 	if st.HasOriginTime {

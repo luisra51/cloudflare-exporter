@@ -510,11 +510,14 @@ func (f *Fake) hostGroups(w http.ResponseWriter, query string, zone func(string,
 	}
 	rows := []row{
 		{"www.example.com", 200, 200, 500, 80},
+		// Served from cache: never reached the origin, so Cloudflare
+		// reports origin status 0 and an average origin time of -1.
+		{"www.example.com", 200, 0, 58, -1},
 		{"www.example.com", 404, 404, 20, 20},
 		{"www.example.com", 503, 503, 5, 3000},
 		{"api.example.com", 200, 200, 300, 120},
 		{"api.example.com", 500, 500, 10, 900},
-		{"static.example.com", 200, 0, 50, 0},
+		{"static.example.com", 200, 0, 50, -1},
 	}
 	for i := 0; i < extra; i++ {
 		rows = append(rows, row{fmt.Sprintf("h%d.example.com", i), 200, 200, 1, 10})

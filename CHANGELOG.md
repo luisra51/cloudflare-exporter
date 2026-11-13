@@ -1,5 +1,21 @@
 # Changelog
 
+## 1.2.1
+
+### Fixed
+
+- `cloudflare_zone_host_origin_response_time_seconds` could be negative or
+  biased low: groups with `originResponseStatus = 0` (request never reached
+  the origin) report an average origin time of `-1` and were included. The
+  average now covers only groups that reached the origin, and the series is
+  absent for hosts with no origin requests in the window. The origin time is
+  only requested together with `originResponseStatus`.
+
+### Added
+
+- `cloudflare_zone_host_origin_requests`: requests per host that reached the
+  origin (`originResponseStatus > 0`), the weight of the average above.
+
 ## 1.2.0
 
 ### Added

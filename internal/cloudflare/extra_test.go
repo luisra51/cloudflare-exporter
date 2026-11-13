@@ -42,7 +42,8 @@ func TestZoneHostTrafficBaseFields(t *testing.T) {
 	if st.HasBytes || st.HasOrigin || st.HasOriginTime {
 		t.Fatalf("no optional fields expected: %+v", st)
 	}
-	if st.Requests[cloudflare.HostKey{Host: "api.example.com", Status: 500}] != 10 || len(st.Requests) != 6 {
+	if st.Requests[cloudflare.HostKey{Host: "api.example.com", Status: 500}] != 10 ||
+		st.Requests[cloudflare.HostKey{Host: "www.example.com", Status: 200}] != 558 || len(st.Requests) != 6 {
 		t.Fatalf("unexpected requests: %v", st.Requests)
 	}
 }
@@ -55,7 +56,7 @@ func TestZoneHostTrafficOptionalFields(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !st.HasBytes || st.Bytes["www.example.com"] != 525000 {
+	if !st.HasBytes || st.Bytes["www.example.com"] != 583000 {
 		t.Fatalf("bytes: %v", st.Bytes)
 	}
 	if st.Origin5xx["www.example.com"] != 5 || st.Origin5xx["api.example.com"] != 10 {
@@ -64,6 +65,17 @@ func TestZoneHostTrafficOptionalFields(t *testing.T) {
 	// api: (300*120 + 10*900) / 310 ms
 	if got := st.OriginTimeSum["api.example.com"] / st.OriginTimeWeight["api.example.com"]; got < 145 || got > 146 {
 		t.Fatalf("origin time avg: %v", got)
+	}
+	// Regression: groups with originResponseStatus 0 report an average of
+	// -1 and must be ignored. www: (500*80 + 20*20 + 5*3000) / 525 ms.
+	if got := st.OriginTimeSum["www.example.com"] / st.OriginTimeWeight["www.example.com"]; got < 105.52 || got > 105.53 {
+		t.Fatalf("www origin time avg must ignore origin-0 groups: %v", got)
+	}
+	if st.OriginTimeWeight["static.example.com"] != 0 || st.OriginRequests["static.example.com"] != 0 {
+		t.Fatalf("a host with no origin traffic must have no origin time: %v %v", st.OriginTimeWeight, st.OriginRequests)
+	}
+	if st.OriginRequests["www.example.com"] != 525 || st.OriginRequests["api.example.com"] != 310 {
+		t.Fatalf("origin requests: %v", st.OriginRequests)
 	}
 }
 

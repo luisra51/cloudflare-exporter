@@ -325,12 +325,19 @@ the rest summed as `host="other"`. Counts are sampled estimates.
 | `cloudflare_zone_host_requests_by_status` | `host`, `status` | Requests by exact edge status (only with `CF_HOST_EXACT_STATUS=true`) |
 | `cloudflare_zone_host_bytes` | `host` | Bytes sent to clients (only if the zone may query `edgeResponseBytes`) |
 | `cloudflare_zone_host_origin_5xx_requests` | `host` | Requests whose origin answered 5xx (only if the zone may query `originResponseStatus`) |
-| `cloudflare_zone_host_origin_response_time_seconds` | `host` | Average origin response time (only if the zone may query `originResponseDurationMs`) |
+| `cloudflare_zone_host_origin_requests` | `host` | Requests that reached the origin, `originResponseStatus > 0` (only if the zone may query `originResponseStatus`) |
+| `cloudflare_zone_host_origin_response_time_seconds` | `host` | Average origin response time over the requests that reached the origin, weighted by count; absent for a host with no origin requests in the window (only if the zone may query `originResponseDurationMs` and `originResponseStatus`) |
 | `cloudflare_zone_host_truncated` | | `1` if the query hit the API row limit and counts are a lower bound |
 
 The optional fields are requested only when the zone's `settings` node lists
 them in `availableFields`; if Cloudflare still refuses, the query is retried
 with the base fields.
+
+Requests that never reach the origin (cache hits, edge redirects, clients that
+close early) have `originResponseStatus = 0` and Cloudflare reports their
+average origin time as `-1`. They are left out of the origin metrics, so
+`cloudflare_zone_host_origin_response_time_seconds` is the average over
+`cloudflare_zone_host_origin_requests` only.
 
 ### Edge certificates (`/zones/{id}/ssl/certificate_packs?status=all`)
 

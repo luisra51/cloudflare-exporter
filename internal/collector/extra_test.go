@@ -27,8 +27,8 @@ cloudflare_zone_host_requests{account="Example Account",host="api.example.com",s
 cloudflare_zone_host_requests{account="Example Account",host="api.example.com",status_class="5xx",zone="example.org"} 10
 cloudflare_zone_host_requests{account="Example Account",host="other",status_class="2xx",zone="example.com"} 50
 cloudflare_zone_host_requests{account="Example Account",host="other",status_class="2xx",zone="example.org"} 50
-cloudflare_zone_host_requests{account="Example Account",host="www.example.com",status_class="2xx",zone="example.com"} 500
-cloudflare_zone_host_requests{account="Example Account",host="www.example.com",status_class="2xx",zone="example.org"} 500
+cloudflare_zone_host_requests{account="Example Account",host="www.example.com",status_class="2xx",zone="example.com"} 558
+cloudflare_zone_host_requests{account="Example Account",host="www.example.com",status_class="2xx",zone="example.org"} 558
 cloudflare_zone_host_requests{account="Example Account",host="www.example.com",status_class="4xx",zone="example.com"} 20
 cloudflare_zone_host_requests{account="Example Account",host="www.example.com",status_class="4xx",zone="example.org"} 20
 cloudflare_zone_host_requests{account="Example Account",host="www.example.com",status_class="5xx",zone="example.com"} 5
@@ -42,7 +42,7 @@ cloudflare_zone_host_origin_5xx_requests{account="Example Account",host="www.exa
 # TYPE cloudflare_zone_host_bytes gauge
 cloudflare_zone_host_bytes{account="Example Account",host="api.example.com",zone="example.org"} 310000
 cloudflare_zone_host_bytes{account="Example Account",host="other",zone="example.org"} 50000
-cloudflare_zone_host_bytes{account="Example Account",host="www.example.com",zone="example.org"} 525000
+cloudflare_zone_host_bytes{account="Example Account",host="www.example.com",zone="example.org"} 583000
 # HELP cloudflare_zone_host_window_seconds Length of the rolling window the cloudflare_zone_host_* metrics describe. Divide by it to get a per-second rate.
 # TYPE cloudflare_zone_host_window_seconds gauge
 cloudflare_zone_host_window_seconds{account="Example Account",zone="example.com"} 300
@@ -53,8 +53,22 @@ cloudflare_zone_host_window_seconds{account="Example Account",zone="example.org"
 	if n := testutil.CollectAndCount(c, "cloudflare_zone_host_requests_by_status"); n != 0 {
 		t.Fatalf("exact status must be off by default, got %d", n)
 	}
-	if n := testutil.CollectAndCount(c, "cloudflare_zone_host_origin_response_time_seconds"); n != 3 {
-		t.Fatalf("origin time only for the pro zone: %d", n)
+	// Regression: origin-0 groups (cache hits, edge redirects, 499) report
+	// avg -1 and must not pull the average down or make it negative; a
+	// host with no origin traffic ("other" = static.example.com) has no
+	// origin time series at all.
+	if err := testutil.GatherAndCompare(reg, strings.NewReader(`
+# HELP cloudflare_zone_host_origin_response_time_seconds Average origin response time per host in the rolling window, over requests that reached the origin. Absent for hosts with no origin requests in the window.
+# TYPE cloudflare_zone_host_origin_response_time_seconds gauge
+cloudflare_zone_host_origin_response_time_seconds{account="Example Account",host="api.example.com",zone="example.org"} 0.14516129032258063
+cloudflare_zone_host_origin_response_time_seconds{account="Example Account",host="www.example.com",zone="example.org"} 0.10552380952380952
+# HELP cloudflare_zone_host_origin_requests Requests per host that reached the origin (originResponseStatus > 0) in the rolling window (sampled estimate). Only when the zone may query originResponseStatus.
+# TYPE cloudflare_zone_host_origin_requests gauge
+cloudflare_zone_host_origin_requests{account="Example Account",host="api.example.com",zone="example.org"} 310
+cloudflare_zone_host_origin_requests{account="Example Account",host="other",zone="example.org"} 0
+cloudflare_zone_host_origin_requests{account="Example Account",host="www.example.com",zone="example.org"} 525
+`), "cloudflare_zone_host_origin_response_time_seconds", "cloudflare_zone_host_origin_requests"); err != nil {
+		t.Fatal(err)
 	}
 }
 

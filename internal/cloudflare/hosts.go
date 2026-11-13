@@ -62,11 +62,14 @@ type HostKey struct {
 type HostStats struct {
 	Requests map[HostKey]float64
 	// Optional fields, filled only when the zone may query them.
-	HasBytes      bool
-	Bytes         map[string]float64
-	HasOrigin     bool
-	Origin5xx     map[string]float64
-	HasOriginTime bool
+	HasBytes  bool
+	Bytes     map[string]float64
+	HasOrigin bool
+	Origin5xx map[string]float64
+	// OriginRequests counts requests that reached the origin
+	// (originResponseStatus > 0).
+	OriginRequests map[string]float64
+	HasOriginTime  bool
 	// OriginTimeSum is avg(originResponseDurationMs) weighted by count,
 	// summed per host; divide by OriginTimeWeight for the average.
 	OriginTimeSum    map[string]float64
@@ -121,9 +124,12 @@ func (c *Client) ZoneHostTraffic(ctx context.Context, zoneTag string, start, end
 		return HostStats{}, ErrDatasetUnavailable
 	}
 	opts := hostQueryOptions{
-		bytes:      ns.HasField("sum", "edgeResponseBytes"),
-		origin:     ns.HasField("", "originResponseStatus"),
-		originTime: ns.HasField("avg", "originResponseDurationMs"),
+		bytes:  ns.HasField("sum", "edgeResponseBytes"),
+		origin: ns.HasField("", "originResponseStatus"),
+		// The origin time is only meaningful per origin status: groups that
+		// never reached the origin report originResponseStatus 0 and an
+		// average of -1, so it needs the origin dimension to filter them.
+		originTime: ns.HasField("avg", "originResponseDurationMs") && ns.HasField("", "originResponseStatus"),
 	}
 	limit := ns.MaxPageSize
 	if limit <= 0 || limit > 10000 {
@@ -139,7 +145,7 @@ func (c *Client) ZoneHostTraffic(ctx context.Context, zoneTag string, start, end
 
 func (c *Client) hostTraffic(ctx context.Context, zoneTag string, start, end time.Time, ns NodeSettings, limit int, o hostQueryOptions) (HostStats, error) {
 	st := HostStats{
-		Requests: map[HostKey]float64{}, Bytes: map[string]float64{}, Origin5xx: map[string]float64{},
+		Requests: map[HostKey]float64{}, Bytes: map[string]float64{}, Origin5xx: map[string]float64{}, OriginRequests: map[string]float64{},
 		OriginTimeSum: map[string]float64{}, OriginTimeWeight: map[string]float64{},
 		HasBytes: o.bytes, HasOrigin: o.origin, HasOriginTime: o.originTime,
 	}
@@ -205,12 +211,19 @@ func (c *Client) hostWindow(ctx context.Context, zoneTag string, start, end time
 		if st.HasBytes {
 			st.Bytes[host] += g.Sum.EdgeResponseBytes
 		}
+		var originStatus int64
 		if st.HasOrigin {
-			if os, err := g.Dimensions.OriginStatus.Int64(); err == nil && os >= 500 && os <= 599 {
+			originStatus, _ = g.Dimensions.OriginStatus.Int64()
+			if originStatus > 0 {
+				st.OriginRequests[host] += g.Count
+			}
+			if originStatus >= 500 && originStatus <= 599 {
 				st.Origin5xx[host] += g.Count
 			}
 		}
-		if st.HasOriginTime && g.Count > 0 {
+		// Only groups that reached the origin carry a real origin time;
+		// the others report -1.
+		if st.HasOriginTime && originStatus > 0 && g.Count > 0 && g.Avg.OriginResponseDurationMs >= 0 {
 			st.OriginTimeSum[host] += g.Avg.OriginResponseDurationMs * g.Count
 			st.OriginTimeWeight[host] += g.Count
 		}
