@@ -1,0 +1,102 @@
+version: "3"
+
+vars:
+  BINARY: cloudflare-exporter
+  IMAGE: luisra51/cloudflare-exporter
+  VERSION:
+    sh: git describe --tags --always --dirty 2>/dev/null || echo dev
+  REVISION:
+    sh: git rev-parse --short HEAD 2>/dev/null || echo unknown
+  LDFLAGS: -s -w -X main.version={{.VERSION}} -X main.revision={{.REVISION}}
+  GOLANGCI_LINT_VERSION: v2.15.0
+
+includes:
+  dev:
+    taskfile: ./taskfiles/Docker.yml
+    flatten: true
+    vars:
+      DC_FILE: ./docker-compose-dev.yml
+      DEFAULT_SERVICE: cloudflare-exporter-dev
+
+tasks:
+  default:
+    cmds:
+      - task --list
+
+  build:
+    desc: "Build the binary into ./bin"
+    cmds:
+      - CGO_ENABLED=0 go build -trimpath -ldflags "{{.LDFLAGS}}" -o bin/{{.BINARY}} ./cmd/{{.BINARY}}
+
+  test:
+    desc: "Run unit tests with the race detector"
+    cmds:
+      - go test -race -count=1 ./...
+
+  cover:
+    desc: "Run tests with coverage report"
+    cmds:
+      - go test -coverprofile=coverage.out ./...
+      - go tool cover -func=coverage.out | tail -1
+
+  vet:
+    desc: "Run go vet"
+    cmds:
+      - go vet ./...
+
+  fmt:
+    desc: "Format the code"
+    cmds:
+      - gofmt -w .
+
+  lint:
+    desc: "Run golangci-lint (local binary if present, otherwise the Docker image)"
+    cmds:
+      - |
+        if command -v golangci-lint >/dev/null 2>&1; then
+          golangci-lint run ./...
+        else
+          docker run --rm -v "$PWD":/app -w /app golangci/golangci-lint:{{.GOLANGCI_LINT_VERSION}} golangci-lint run ./...
+        fi
+
+  check:
+    desc: "vet + lint + test"
+    cmds:
+      - task: vet
+      - task: lint
+      - task: test
+
+  run:
+    desc: "Run the exporter locally (needs CF_API_TOKEN in the environment)"
+    cmds:
+      - go run -ldflags "{{.LDFLAGS}}" ./cmd/{{.BINARY}} {{.CLI_ARGS}}
+
+  run:fake:
+    desc: "Run against the bundled fake Cloudflare API (no account needed)"
+    cmds:
+      - |
+        go run ./hack/fake-cloudflare -listen 127.0.0.1:8787 &
+        FAKE=$!
+        trap 'kill $FAKE' EXIT
+        sleep 2
+        CF_API_TOKEN=test-token CF_API_URL=http://127.0.0.1:8787 go run ./cmd/{{.BINARY}} {{.CLI_ARGS}}
+
+  docker:build:
+    desc: "Build the image for the local architecture"
+    cmds:
+      - docker build --build-arg VERSION={{.VERSION}} --build-arg REVISION={{.REVISION}} -t {{.IMAGE}}:{{.VERSION}} .
+
+  docker:buildx:
+    desc: "Build the multi-arch image (linux/amd64, linux/arm64) without pushing"
+    cmds:
+      - docker buildx build --platform linux/amd64,linux/arm64 --build-arg VERSION={{.VERSION}} --build-arg REVISION={{.REVISION}} -t {{.IMAGE}}:{{.VERSION}} .
+
+  docker:run:
+    desc: "Run the local image (needs CF_API_TOKEN in the environment)"
+    cmds:
+      - docker run --rm -p 8080:8080 -e CF_API_TOKEN {{.IMAGE}}:{{.VERSION}} {{.CLI_ARGS}}
+
+  clean:
+    desc: "Remove build artifacts"
+    cmds:
+      - rm -rf bin coverage.out

@@ -1,0 +1,13 @@
+.git
+.github
+.gitignore
+Dockerfile
+*.md
+.cache/
+.idea
+.vscode
+**/.DS_Store
+**/dist
+**/bin
+**/.env
+**/*.env

@@ -1,0 +1,13 @@
+services:
+  cloudflare-exporter-dev:
+    image: golang:1.26
+    working_dir: /workspace
+    volumes:
+      - ./:/workspace
+    ports:
+      - "8080:8080"
+    tty: true
+    stdin_open: true
+    env_file:
+      - path: cloudflare-exporter-dev.env
+        required: false

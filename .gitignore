@@ -1,0 +1,10 @@
+/bin/
+/dist/
+/out/
+*.env
+!*.env.example
+.cache/
+coverage.out
+.DS_Store
+.idea/
+.vscode/
