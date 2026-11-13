@@ -25,6 +25,8 @@ type API interface {
 	ZoneHTTP1h(ctx context.Context, zoneTag string, start, end time.Time) (cloudflare.HTTPStats, error)
 	ZoneFirewallEvents(ctx context.Context, zoneTag string, start, end time.Time, s cloudflare.ZoneSettings) (cloudflare.FirewallStats, error)
 	AccountHTTPOverview(ctx context.Context, accountTag string, start, end time.Time) (cloudflare.AccountStats, error)
+	ListTunnels(ctx context.Context, accountID string) ([]cloudflare.Tunnel, error)
+	TunnelConnectors(ctx context.Context, accountID string, t cloudflare.Tunnel) ([]cloudflare.Connector, error)
 }
 
 // Options configures the collector.
@@ -37,6 +39,7 @@ type Options struct {
 	TopCountries   int
 	FirewallEvents bool
 	AccountMetrics bool
+	TunnelMetrics  bool
 	SettingsTTL    time.Duration // default 6h
 	Now            func() time.Time
 }
@@ -48,6 +51,8 @@ const (
 	dsHTTP     = cloudflare.DatasetHTTP1h
 	dsFirewall = "firewallEvents"
 	dsAccount  = cloudflare.DatasetAccountOverview
+	dsTunnels  = "tunnels"
+	dsConnects = "tunnel_connectors"
 )
 
 type statusKey struct{ scope, target, dataset string }
@@ -86,6 +91,8 @@ type Collector struct {
 	zones        map[string]*zoneState
 	accounts     map[string]*accountState
 	accountNames map[string]string
+	tunnels      map[string][]tunnelState // by account id
+	tunnelWarned map[string]bool
 	settings     map[string]settingsEntry
 	statuses     map[statusKey]*status
 	lastRun      time.Time
@@ -112,6 +119,8 @@ func New(api API, opts Options, log *slog.Logger) *Collector {
 		zones:        map[string]*zoneState{},
 		accounts:     map[string]*accountState{},
 		accountNames: map[string]string{},
+		tunnels:      map[string][]tunnelState{},
+		tunnelWarned: map[string]bool{},
 		settings:     map[string]settingsEntry{},
 		statuses:     map[statusKey]*status{},
 		duration: prometheus.NewGauge(prometheus.GaugeOpts{
@@ -216,15 +225,26 @@ func (c *Collector) CollectOnce(ctx context.Context) {
 			}
 		}(z)
 	}
-	if c.opts.AccountMetrics {
+	if c.opts.AccountMetrics || c.opts.TunnelMetrics {
 		for _, id := range c.accountIDs(ctx, zones) {
-			wg.Add(1)
-			go func(id string) {
-				defer wg.Done()
-				if !c.collectAccount(ctx, id, start, end) {
-					failed.Add(1)
-				}
-			}(id)
+			if c.opts.AccountMetrics {
+				wg.Add(1)
+				go func(id string) {
+					defer wg.Done()
+					if !c.collectAccount(ctx, id, start, end) {
+						failed.Add(1)
+					}
+				}(id)
+			}
+			if c.opts.TunnelMetrics {
+				wg.Add(1)
+				go func(id string) {
+					defer wg.Done()
+					if !c.collectTunnels(ctx, id) {
+						failed.Add(1)
+					}
+				}(id)
+			}
 		}
 	}
 	wg.Wait()
@@ -390,6 +410,12 @@ func (c *Collector) accountIDs(ctx context.Context, zones []cloudflare.Zone) []s
 	for id := range c.accounts {
 		if !slices.Contains(ids, id) {
 			delete(c.accounts, id)
+			c.dropStatuses("account", id)
+		}
+	}
+	for id := range c.tunnels {
+		if !slices.Contains(ids, id) {
+			delete(c.tunnels, id)
 			c.dropStatuses("account", id)
 		}
 	}

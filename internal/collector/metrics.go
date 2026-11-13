@@ -2,6 +2,7 @@ package collector
 
 import (
 	"sort"
+	"strings"
 
 	"github.com/luisra51/cloudflare-exporter/internal/cloudflare"
 	"github.com/prometheus/client_golang/prometheus"
@@ -62,6 +63,31 @@ var (
 	descAccCachedBytes = prometheus.NewDesc("cloudflare_account_hourly_cached_bytes",
 		"Cached bytes across all zones of the account during the last complete hour.", []string{"account", "account_id"}, nil)
 
+	tunnelLabels = []string{"account", "tunnel"}
+
+	descTunnelInfo = prometheus.NewDesc("cloudflare_tunnel_info",
+		"Tunnel metadata. Always 1.", []string{"account", "account_id", "tunnel", "tunnel_id", "type", "config_src"}, nil)
+	descTunnelStatus = prometheus.NewDesc("cloudflare_tunnel_status",
+		"Tunnel status as a state set: 1 for the current status, 0 for the others.", append(tunnelLabels, "status"), nil)
+	descTunnelUp = prometheus.NewDesc("cloudflare_tunnel_up",
+		"1 if the tunnel status is healthy or degraded, 0 otherwise.", tunnelLabels, nil)
+	descTunnelConns = prometheus.NewDesc("cloudflare_tunnel_connections",
+		"Edge connections of the tunnel.", tunnelLabels, nil)
+	descTunnelPending = prometheus.NewDesc("cloudflare_tunnel_connections_pending_reconnect",
+		"Edge connections flagged as pending reconnect (Cloudflare has deprecated this flag and may always report 0).", tunnelLabels, nil)
+	descTunnelByColo = prometheus.NewDesc("cloudflare_tunnel_connections_by_colo",
+		"Edge connections of the tunnel by Cloudflare data center.", append(tunnelLabels, "colo"), nil)
+	descTunnelConnectors = prometheus.NewDesc("cloudflare_tunnel_connectors",
+		"Distinct connectors (cloudflared or WARP Connector instances) reported for the tunnel.", tunnelLabels, nil)
+	descConnectorInfo = prometheus.NewDesc("cloudflare_tunnel_connector_info",
+		"Connector metadata. Always 1.", append(tunnelLabels, "connector_id", "version", "arch"), nil)
+	descTunnelActive = prometheus.NewDesc("cloudflare_tunnel_active_since_timestamp_seconds",
+		"Unix time the tunnel last became active (conns_active_at).", tunnelLabels, nil)
+	descTunnelInactive = prometheus.NewDesc("cloudflare_tunnel_inactive_since_timestamp_seconds",
+		"Unix time the tunnel last became inactive (conns_inactive_at). Absent when Cloudflare reports none.", tunnelLabels, nil)
+
+	tunnelStatuses = []string{"healthy", "degraded", "down", "inactive"}
+
 	descUp = prometheus.NewDesc("cloudflare_exporter_up",
 		"1 if the last attempt to collect this dataset for this target succeeded.", []string{"scope", "target", "dataset"}, nil)
 	descLastSuccess = prometheus.NewDesc("cloudflare_exporter_last_success_timestamp_seconds",
@@ -78,7 +104,15 @@ func (c *Collector) publish() {
 	defer c.mu.Unlock()
 
 	var ms []prometheus.Metric
+	// seen drops duplicate series (for example two tunnels with the same
+	// name in one account): a duplicate would make the whole scrape fail.
+	seen := map[string]bool{}
 	g := func(d *prometheus.Desc, v float64, labels ...string) {
+		key := d.String() + "\x00" + strings.Join(labels, "\x00")
+		if seen[key] {
+			return
+		}
+		seen[key] = true
 		ms = append(ms, prometheus.MustNewConstMetric(d, prometheus.GaugeValue, v, labels...))
 	}
 
@@ -141,6 +175,16 @@ func (c *Collector) publish() {
 		g(descAccCachedRequests, as.stats.CachedRequests, name, as.id)
 		g(descAccBytes, as.stats.Bytes, name, as.id)
 		g(descAccCachedBytes, as.stats.CachedBytes, name, as.id)
+	}
+
+	for accID, states := range c.tunnels {
+		acc := c.accountNames[accID]
+		if acc == "" {
+			acc = accID
+		}
+		for _, ts := range states {
+			publishTunnel(g, acc, accID, ts)
+		}
 	}
 
 	for k, s := range c.statuses {
@@ -211,4 +255,75 @@ func topCountries(m map[string]cloudflare.CountryStats, n int) []countryEntry {
 		other.stats.Bytes += e.stats.Bytes
 	}
 	return append(all[:n], other)
+}
+
+func publishTunnel(g func(*prometheus.Desc, float64, ...string), acc, accID string, ts tunnelState) {
+	t := ts.tunnel
+	name := t.Name
+	if name == "" {
+		name = t.ID
+	}
+	configSrc := t.ConfigSrc
+	if configSrc == "" {
+		configSrc = "unknown"
+	}
+	g(descTunnelInfo, 1, acc, accID, name, t.ID, t.Type, configSrc)
+
+	known := false
+	for _, st := range tunnelStatuses {
+		v := 0.0
+		if st == t.Status {
+			v, known = 1, true
+		}
+		g(descTunnelStatus, v, acc, name, st)
+	}
+	if !known && t.Status != "" {
+		g(descTunnelStatus, 1, acc, name, t.Status)
+	}
+	up := 0.0
+	if t.Status == "healthy" || t.Status == "degraded" {
+		up = 1
+	}
+	g(descTunnelUp, up, acc, name)
+
+	var conns, pending float64
+	byColo := map[string]float64{}
+	for _, cn := range ts.connectors {
+		for _, conn := range cn.Conns {
+			conns++
+			if conn.IsPendingReconnect {
+				pending++
+			}
+			colo := conn.ColoName
+			if colo == "" {
+				colo = "unknown"
+			}
+			byColo[colo]++
+		}
+		version, arch := cn.Version, cn.Arch
+		if version == "" {
+			version = "unknown"
+		}
+		if arch == "" {
+			arch = "unknown"
+		}
+		g(descConnectorInfo, 1, acc, name, cn.ID, version, arch)
+	}
+	g(descTunnelConns, conns, acc, name)
+	g(descTunnelPending, pending, acc, name)
+	for colo, v := range byColo {
+		g(descTunnelByColo, v, acc, name, colo)
+	}
+	ids := map[string]bool{}
+	for _, cn := range ts.connectors {
+		ids[cn.ID] = true
+	}
+	g(descTunnelConnectors, float64(len(ids)), acc, name)
+
+	if !t.ConnsActiveAt.IsZero() {
+		g(descTunnelActive, float64(t.ConnsActiveAt.Unix()), acc, name)
+	}
+	if !t.ConnsInactiveAt.IsZero() {
+		g(descTunnelInactive, float64(t.ConnsInactiveAt.Unix()), acc, name)
+	}
 }

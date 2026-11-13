@@ -19,7 +19,7 @@ func TestDefaults(t *testing.T) {
 		t.Fatal(err)
 	}
 	if c.Listen != ":8080" || c.MetricsPath != "/metrics" || c.ScrapeInterval != 5*time.Minute ||
-		c.HourlyDelay != 10*time.Minute || c.TopCountries != 20 || !c.FirewallEvents || !c.AccountMetrics {
+		c.HourlyDelay != 10*time.Minute || c.TopCountries != 20 || !c.FirewallEvents || !c.AccountMetrics || !c.TunnelMetrics {
 		t.Fatalf("unexpected defaults: %+v", c)
 	}
 }

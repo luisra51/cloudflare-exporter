@@ -72,6 +72,7 @@ func run(args []string, stdout, stderr io.Writer) int {
 		TopCountries:   cfg.TopCountries,
 		FirewallEvents: cfg.FirewallEvents,
 		AccountMetrics: cfg.AccountMetrics,
+		TunnelMetrics:  cfg.TunnelMetrics,
 	}, logger)
 
 	reg := prometheus.NewRegistry()

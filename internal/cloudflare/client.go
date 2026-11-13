@@ -75,7 +75,37 @@ func New(baseURL, token string, opts ...Option) *Client {
 // APIError is returned when Cloudflare answers with an error.
 type APIError struct {
 	Status   int
+	Codes    []int
 	Messages []string
+}
+
+// IsAuthError reports whether err means the token lacks a permission
+// (HTTP 401/403, or Cloudflare error code 10000 "Authentication error").
+func IsAuthError(err error) bool {
+	var e *APIError
+	if !errors.As(err, &e) {
+		return false
+	}
+	if e.Status == http.StatusUnauthorized || e.Status == http.StatusForbidden {
+		return true
+	}
+	for _, c := range e.Codes {
+		if c == 10000 {
+			return true
+		}
+	}
+	return false
+}
+
+func newAPIError(status int, data []byte) *APIError {
+	e := &APIError{Status: status, Messages: restErrorMessages(data)}
+	var env restEnvelope
+	if json.Unmarshal(data, &env) == nil {
+		for _, m := range env.Errors {
+			e.Codes = append(e.Codes, m.Code)
+		}
+	}
+	return e
 }
 
 func (e *APIError) Error() string {
@@ -145,7 +175,7 @@ func (c *Client) do(ctx context.Context, method, path string, body []byte) ([]by
 			continue
 		}
 		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode >= 500 {
-			lastErr = &APIError{Status: resp.StatusCode, Messages: restErrorMessages(data)}
+			lastErr = newAPIError(resp.StatusCode, data)
 			if ra, err := strconv.Atoi(resp.Header.Get("Retry-After")); err == nil && ra > 0 && ra <= 60 {
 				select {
 				case <-time.After(time.Duration(ra) * time.Second):
@@ -207,6 +237,7 @@ type restEnvelope struct {
 	ResultInfo *struct {
 		Page       int `json:"page"`
 		TotalPages int `json:"total_pages"`
+		TotalCount int `json:"total_count"`
 	} `json:"result_info"`
 }
 
@@ -233,14 +264,18 @@ func (c *Client) restGet(ctx context.Context, op, path string) (*restEnvelope, e
 		c.noteError("rest", op)
 		return nil, err
 	}
+	if status >= 400 {
+		c.noteError("rest", op)
+		return nil, newAPIError(status, data)
+	}
 	var env restEnvelope
 	if err := json.Unmarshal(data, &env); err != nil {
 		c.noteError("rest", op)
 		return nil, fmt.Errorf("decode %s: HTTP %d: %w", op, status, err)
 	}
-	if status >= 400 || !env.Success {
+	if !env.Success {
 		c.noteError("rest", op)
-		return nil, &APIError{Status: status, Messages: restErrorMessages(data)}
+		return nil, newAPIError(status, data)
 	}
 	return &env, nil
 }

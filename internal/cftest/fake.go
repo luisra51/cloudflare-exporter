@@ -40,11 +40,76 @@ type Fake struct {
 	Calls map[string]int
 	// Seen records whether a request had an unexpected Authorization header.
 	BadAuth int
+
+	// Tunnels returned by /accounts/{id}/tunnels (and /cfd_tunnel).
+	Tunnels []map[string]any
+	// Connectors returned by /accounts/{id}/{type}/{tunnel}/connections,
+	// keyed by tunnel id.
+	Connectors map[string][]any
+	// TunnelsForbidden makes tunnel endpoints answer like a token without
+	// the Cloudflare Tunnel permission.
+	TunnelsForbidden bool
+	// TunnelsLegacyOnly makes /tunnels return 404, so only /cfd_tunnel works.
+	TunnelsLegacyOnly bool
+	// ConnectionsFail makes the connections endpoint return HTTP 500.
+	ConnectionsFail bool
+	// RESTCalls counts REST calls by path.
+	RESTCalls map[string]int
+}
+
+// Synthetic tunnel identifiers.
+const (
+	TunnelHealthy  = "11111111-1111-4111-8111-111111111111"
+	TunnelDown     = "22222222-2222-4222-8222-222222222222"
+	TunnelWARP     = "33333333-3333-4333-8333-333333333333"
+	TunnelGRE      = "44444444-4444-4444-8444-444444444444"
+	ConnectorA     = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+	ConnectorB     = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+	ConnectorC     = "cccccccc-cccc-4ccc-8ccc-cccccccccccc"
+	TunnelActiveAt = "2026-01-02T03:04:05Z"
+)
+
+func conn(id, client, version, colo string, pending bool) map[string]any {
+	return map[string]any{
+		"id": id, "uuid": id, "client_id": client, "client_version": version, "colo_name": colo,
+		"is_pending_reconnect": pending, "opened_at": TunnelActiveAt, "origin_ip": "198.51.100.10",
+	}
+}
+
+func defaultTunnels() ([]map[string]any, map[string][]any) {
+	webConns := []any{
+		conn("c0000001-0000-4000-8000-000000000001", ConnectorA, "2026.1.0", "MAD", false),
+		conn("c0000001-0000-4000-8000-000000000002", ConnectorA, "2026.1.0", "MAD", false),
+		conn("c0000001-0000-4000-8000-000000000003", ConnectorB, "2025.11.1", "MAD", false),
+		conn("c0000001-0000-4000-8000-000000000004", ConnectorB, "2025.11.1", "CDG", true),
+	}
+	warpConns := []any{conn("c0000003-0000-4000-8000-000000000001", ConnectorC, "2026.1.0", "LHR", false)}
+	tunnels := []map[string]any{
+		{"id": TunnelHealthy, "name": "web-tunnel", "status": "healthy", "tun_type": "cfd_tunnel", "config_src": "cloudflare",
+			"created_at": "2025-06-01T00:00:00Z", "conns_active_at": TunnelActiveAt, "conns_inactive_at": nil, "remote_config": true, "connections": webConns},
+		{"id": TunnelDown, "name": "db-tunnel", "status": "down", "tun_type": "cfd_tunnel", "config_src": "local",
+			"created_at": "2025-06-01T00:00:00Z", "conns_active_at": nil, "conns_inactive_at": "2026-01-05T06:07:08Z", "remote_config": false, "connections": []any{}},
+		{"id": TunnelWARP, "name": "office-connector", "status": "degraded", "tun_type": "warp_connector",
+			"created_at": "2025-06-01T00:00:00Z", "conns_active_at": TunnelActiveAt, "conns_inactive_at": nil, "connections": warpConns},
+		{"id": TunnelGRE, "name": "gre-1", "status": "healthy", "tun_type": "gre", "created_at": "2025-06-01T00:00:00Z"},
+	}
+	connectors := map[string][]any{
+		TunnelHealthy: {
+			map[string]any{"id": ConnectorA, "arch": "linux_amd64", "version": "2026.1.0", "run_at": TunnelActiveAt, "features": []any{}, "conns": webConns[:2]},
+			map[string]any{"id": ConnectorB, "arch": "linux_arm64", "version": "2025.11.1", "run_at": TunnelActiveAt, "features": []any{}, "conns": webConns[2:]},
+		},
+		TunnelDown: {},
+		TunnelWARP: {
+			map[string]any{"id": ConnectorC, "arch": "linux_amd64", "version": "2026.1.0", "run_at": TunnelActiveAt, "conns": warpConns},
+		},
+	}
+	return tunnels, connectors
 }
 
 // New returns a fake with three zones: two on the Free plan and one on Pro.
 func New() *Fake {
 	acc := map[string]any{"id": AccountID, "name": "Example Account"}
+	tunnels, connectors := defaultTunnels()
 	return &Fake{
 		Zones: []map[string]any{
 			{"id": ZoneFree, "name": "example.com", "status": "active", "plan": map[string]any{"id": "p0", "name": "Free Website", "legacy_id": "free"}, "account": acc},
@@ -52,6 +117,9 @@ func New() *Fake {
 			{"id": ZoneFree2, "name": "example.net", "status": "active", "plan": map[string]any{"id": "p0", "name": "Free Website", "legacy_id": "free"}, "account": acc},
 		},
 		FirewallEventsPerHour: 120,
+		Tunnels:               tunnels,
+		Connectors:            connectors,
+		RESTCalls:             map[string]int{},
 		FailDatasets:          map[string]bool{},
 		Calls:                 map[string]int{},
 	}
@@ -66,6 +134,15 @@ func (f *Fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	path := r.URL.Path
+	if r.Method == http.MethodGet {
+		f.mu.Lock()
+		f.RESTCalls[path]++
+		f.mu.Unlock()
+	}
+	if parts := strings.Split(strings.Trim(path, "/"), "/"); len(parts) >= 3 && parts[0] == "accounts" {
+		f.tunnelRoutes(w, r, parts)
+		return
+	}
 	switch {
 	case path == "/graphql" && r.Method == http.MethodPost:
 		f.graphql(w, r)
@@ -276,4 +353,61 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+func (f *Fake) tunnelRoutes(w http.ResponseWriter, r *http.Request, parts []string) {
+	f.mu.Lock()
+	forbidden, legacy, connFail := f.TunnelsForbidden, f.TunnelsLegacyOnly, f.ConnectionsFail
+	tunnels, connectors := f.Tunnels, f.Connectors
+	f.mu.Unlock()
+	if forbidden {
+		writeJSON(w, 403, map[string]any{"success": false, "errors": []any{map[string]any{"code": 10000, "message": "Authentication error"}}})
+		return
+	}
+	switch {
+	case len(parts) == 3 && (parts[2] == "tunnels" || parts[2] == "cfd_tunnel"):
+		if parts[2] == "tunnels" && legacy {
+			http.NotFound(w, r)
+			return
+		}
+		var list []map[string]any
+		for _, t := range tunnels {
+			if parts[2] == "cfd_tunnel" && t["tun_type"] != "cfd_tunnel" {
+				continue
+			}
+			list = append(list, t)
+		}
+		perPage, _ := strconv.Atoi(r.URL.Query().Get("per_page"))
+		page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+		if perPage < 1 {
+			perPage = 20
+		}
+		if page < 1 {
+			page = 1
+		}
+		lo := min((page-1)*perPage, len(list))
+		hi := min(lo+perPage, len(list))
+		result := list[lo:hi]
+		if result == nil {
+			result = []map[string]any{}
+		}
+		writeJSON(w, 200, map[string]any{"success": true, "errors": []any{}, "result": result,
+			"result_info": map[string]any{"page": page, "per_page": perPage, "count": hi - lo, "total_count": len(list)}})
+	case len(parts) == 5 && parts[4] == "connections":
+		if connFail {
+			writeJSON(w, 500, map[string]any{"success": false, "errors": []any{map[string]any{"code": 1000, "message": "synthetic failure"}}})
+			return
+		}
+		cs, ok := connectors[parts[3]]
+		if !ok {
+			writeJSON(w, 404, map[string]any{"success": false, "errors": []any{map[string]any{"code": 1003, "message": "tunnel not found"}}})
+			return
+		}
+		if cs == nil {
+			cs = []any{}
+		}
+		writeJSON(w, 200, map[string]any{"success": true, "errors": []any{}, "result": cs})
+	default:
+		http.NotFound(w, r)
+	}
 }

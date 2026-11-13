@@ -34,6 +34,7 @@ type Config struct {
 	TopCountries   int
 	FirewallEvents bool
 	AccountMetrics bool
+	TunnelMetrics  bool
 
 	LogLevel  string
 	LogFormat string
@@ -43,9 +44,9 @@ type Config struct {
 
 // String renders the configuration without the API token.
 func (c Config) String() string {
-	return fmt.Sprintf("api_url=%s zones=%d exclude_zones=%d accounts=%d listen=%s metrics_path=%s scrape_interval=%s hourly_delay=%s concurrency=%d top_countries=%d firewall_events=%t account_metrics=%t",
+	return fmt.Sprintf("api_url=%s zones=%d exclude_zones=%d accounts=%d listen=%s metrics_path=%s scrape_interval=%s hourly_delay=%s concurrency=%d top_countries=%d firewall_events=%t account_metrics=%t tunnel_metrics=%t",
 		c.APIURL, len(c.Zones), len(c.ExcludeZones), len(c.Accounts), c.Listen, c.MetricsPath,
-		c.ScrapeInterval, c.HourlyDelay, c.Concurrency, c.TopCountries, c.FirewallEvents, c.AccountMetrics)
+		c.ScrapeInterval, c.HourlyDelay, c.Concurrency, c.TopCountries, c.FirewallEvents, c.AccountMetrics, c.TunnelMetrics)
 }
 
 // LookupFunc mirrors os.LookupEnv so tests can inject an environment.
@@ -73,6 +74,7 @@ func Load(args []string, env LookupFunc, out io.Writer) (Config, error) {
 		scrapeInterval, hourlyDelay, httpT string
 		concurrency, topCountries          string
 		firewall, accountMetrics           string
+		tunnelMetrics                      string
 	)
 
 	// The token default is not taken from the environment here so that
@@ -91,6 +93,7 @@ func Load(args []string, env LookupFunc, out io.Writer) (Config, error) {
 	fs.StringVar(&topCountries, "top-countries", get("CF_TOP_COUNTRIES", "20"), "countries exported per zone; the rest are summed as country=\"other\"; 0 disables country metrics (env CF_TOP_COUNTRIES)")
 	fs.StringVar(&firewall, "firewall-events", get("CF_FIREWALL_EVENTS", "true"), "collect firewall (security) events (env CF_FIREWALL_EVENTS)")
 	fs.StringVar(&accountMetrics, "account-metrics", get("CF_ACCOUNT_METRICS", "true"), "collect account-level HTTP metrics (env CF_ACCOUNT_METRICS)")
+	fs.StringVar(&tunnelMetrics, "tunnel-metrics", get("CF_TUNNEL_METRICS", "true"), "collect Cloudflare Tunnel health metrics (env CF_TUNNEL_METRICS)")
 	fs.StringVar(&c.LogLevel, "log-level", get("LOG_LEVEL", "info"), "log level: debug, info, warn, error (env LOG_LEVEL)")
 	fs.StringVar(&c.LogFormat, "log-format", get("LOG_FORMAT", "text"), "log format: text or json (env LOG_FORMAT)")
 	fs.BoolVar(&c.ShowVersion, "version", false, "print version and exit")
@@ -140,6 +143,9 @@ func Load(args []string, env LookupFunc, out io.Writer) (Config, error) {
 	}
 	if c.AccountMetrics, err = strconv.ParseBool(accountMetrics); err != nil {
 		errs = append(errs, fmt.Errorf("CF_ACCOUNT_METRICS: invalid boolean %q", accountMetrics))
+	}
+	if c.TunnelMetrics, err = strconv.ParseBool(tunnelMetrics); err != nil {
+		errs = append(errs, fmt.Errorf("CF_TUNNEL_METRICS: invalid boolean %q", tunnelMetrics))
 	}
 	if !strings.HasPrefix(c.MetricsPath, "/") {
 		errs = append(errs, fmt.Errorf("METRICS_PATH must start with '/', got %q", c.MetricsPath))

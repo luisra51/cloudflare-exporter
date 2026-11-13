@@ -17,7 +17,7 @@
 [![License](https://img.shields.io/badge/license-Apache--2.0-blue?style=for-the-badge)](LICENSE)
 [![Multi-arch](https://img.shields.io/badge/arch-amd64%20%7C%20arm64-555555?style=for-the-badge&logo=linux)](https://hub.docker.com/r/luisra51/cloudflare-exporter/tags)
 
-> 📈 **Traffic, status codes and security events for every zone your token can see, Free plan included.**
+> 📈 **Traffic, status codes, security events and tunnel health for every zone and account your token can see, Free plan included.**
 
 ## 🤔 Why another Cloudflare exporter?
 
@@ -35,6 +35,7 @@ a zone's plan allows it.
 | HTTP traffic (requests, bytes, cache, page views, visitors) | ✅ | ❌ zone skipped |
 | Requests by HTTP status code | ✅ | ❌ zone skipped |
 | Security (firewall) events by action and source | ✅ | ❌ zone skipped |
+| Cloudflare Tunnel health (status, connections, connectors) | ✅ | varies |
 | Multi-arch image (amd64 + arm64) | ✅ | varies |
 | Background collection (scrapes never call the API) | ✅ | varies |
 
@@ -44,6 +45,7 @@ a zone's plan allows it.
 - **🔍 Plan-aware**: reads Cloudflare's GraphQL `settings` node per zone and uses `firewallEventsAdaptiveGroups` automatically when the plan allows it
 - **🌐 Auto-discovery**: collects every zone the token can see, or an allowlist (`CF_ZONES`), minus exclusions (`CF_EXCLUDE_ZONES`)
 - **🏢 Account metrics**: account-wide traffic from `httpRequestsOverviewAdaptiveGroups`
+- **🚇 Tunnels**: status, edge connections per data center, connectors and their `cloudflared` versions for Cloudflare Tunnels and WARP Connectors (available on every plan)
 - **⚡ Background collection**: Cloudflare is queried every `SCRAPE_INTERVAL`; `/metrics` serves the cache, so scrapes are instant and never spend API quota
 - **🧮 Bounded cardinality**: countries capped to a top N plus `other`; status, HTTP version, action and source are small enumerations
 - **✂️ Exact counts on busy zones**: raw security events are split into smaller windows when a page fills up, with a query budget and a `truncated` flag when that is not enough
@@ -127,11 +129,15 @@ The exporter only needs **read** access.
    | Zone | **Firewall Services** | security events |
    | Account | **Account Analytics** | account-wide traffic |
    | Account | **Account Settings** | account name |
+   | Account | **Cloudflare Tunnel** | tunnel metrics (optional) |
 
 4. Under **Zone Resources** and **Account Resources**, include only what you want to monitor.
 5. Create the token and pass it as `CF_API_TOKEN`.
 
-Without the account permissions, set `CF_ACCOUNT_METRICS=false`.
+Without the account permissions, set `CF_ACCOUNT_METRICS=false`. The
+Cloudflare Tunnel permission is only needed for tunnel metrics: without it the
+exporter logs one warning, reports `cloudflare_exporter_up{dataset="tunnels"} 0`
+and keeps collecting everything else (or set `CF_TUNNEL_METRICS=false`).
 
 ## ⚙️ Configuration
 
@@ -151,6 +157,7 @@ environment variable for the token, since flags are visible in the process list.
 | `CF_TOP_COUNTRIES` | `--top-countries` | `20` | Countries per zone; the rest are summed as `country="other"`; `0` disables country metrics |
 | `CF_FIREWALL_EVENTS` | `--firewall-events` | `true` | Collect security events |
 | `CF_ACCOUNT_METRICS` | `--account-metrics` | `true` | Collect account-level metrics |
+| `CF_TUNNEL_METRICS` | `--tunnel-metrics` | `true` | Collect Cloudflare Tunnel health metrics |
 | `CF_CONCURRENCY` | `--concurrency` | `4` | Maximum concurrent Cloudflare API requests |
 | `CF_HTTP_TIMEOUT` | `--http-timeout` | `30s` | Timeout per API request |
 | `CF_API_URL` | `--api-url` | `https://api.cloudflare.com/client/v4` | API base URL (for testing) |
@@ -183,9 +190,13 @@ environment variable for the token, since flags are visible in the process list.
   minute, with a budget of 32 queries per zone and cycle. If that is still not
   enough, `cloudflare_zone_hourly_firewall_events_truncated` is `1` and the
   count is a lower bound.
+- Tunnel metrics are not hourly: they describe the state at the last
+  collection cycle.
 - Requests go through a concurrency limit and are retried on HTTP 429/5xx.
   Cloudflare allows 300 GraphQL queries per 5 minutes per user; with defaults
-  the exporter uses about 2–3 queries per zone per cycle, plus one per account.
+  the exporter uses about 2–3 GraphQL queries per zone per cycle, plus one per
+  account. Tunnel metrics use REST calls instead: one list per account and one
+  per tunnel.
 
 ## 📊 Metrics
 
@@ -233,12 +244,35 @@ All with labels `zone` and `account`.
 | `cloudflare_account_hourly_bytes` | `account`, `account_id` | Bytes |
 | `cloudflare_account_hourly_cached_bytes` | `account`, `account_id` | Cached bytes |
 
+### Cloudflare Tunnels (current state)
+
+Covers Cloudflare Tunnels (`cfd_tunnel`) and WARP Connectors
+(`warp_connector`) that are not deleted, in the same accounts as the account
+metrics. Read on every collection cycle from the REST API
+(`/accounts/{id}/tunnels` and `/accounts/{id}/{type}/{tunnel}/connections`,
+one call per tunnel; if that call fails, connections are taken from the
+list response and `arch` is `unknown`). All with labels `account` and `tunnel` (the tunnel name).
+The connector's public origin IP is **never** exported, by design.
+
+| Metric | Extra labels | Description |
+|---|---|---|
+| `cloudflare_tunnel_info` | `account_id`, `tunnel_id`, `type`, `config_src` | Always `1`; `type` is `cfd_tunnel` or `warp_connector`, `config_src` is `cloudflare`, `local` or `unknown` |
+| `cloudflare_tunnel_status` | `status` | State set: `1` for the current status (`healthy`, `degraded`, `down`, `inactive`), `0` for the others |
+| `cloudflare_tunnel_up` | | `1` if the status is `healthy` or `degraded` |
+| `cloudflare_tunnel_connections` | | Edge connections |
+| `cloudflare_tunnel_connections_pending_reconnect` | | Connections flagged as pending reconnect (Cloudflare has deprecated this flag; it may always be `0`) |
+| `cloudflare_tunnel_connections_by_colo` | `colo` | Edge connections by Cloudflare data center |
+| `cloudflare_tunnel_connectors` | | Distinct connectors (`cloudflared` / WARP Connector instances) |
+| `cloudflare_tunnel_connector_info` | `connector_id`, `version`, `arch` | Always `1`, one per connector |
+| `cloudflare_tunnel_active_since_timestamp_seconds` | | When the tunnel last became active (absent if never) |
+| `cloudflare_tunnel_inactive_since_timestamp_seconds` | | When the tunnel last became inactive (absent if Cloudflare reports none) |
+
 ### Metadata and exporter health
 
 | Metric | Labels | Description |
 |---|---|---|
 | `cloudflare_zone_info` | `zone`, `zone_id`, `account`, `account_id`, `plan`, `status` | Always `1`; `plan` is `free`, `pro`, `business`, `enterprise`, ... |
-| `cloudflare_exporter_up` | `scope`, `target`, `dataset` | `1` if the last attempt succeeded; `scope` is `zone`, `account` or `exporter` |
+| `cloudflare_exporter_up` | `scope`, `target`, `dataset` | `1` if the last attempt succeeded; `scope` is `zone`, `account` or `exporter`; `dataset` is `zones`, `settings`, `httpRequests1hGroups`, `firewallEvents`, `httpRequestsOverviewAdaptiveGroups`, `tunnels` or `tunnel_connectors` |
 | `cloudflare_exporter_last_success_timestamp_seconds` | `scope`, `target`, `dataset` | Time of the last success |
 | `cloudflare_exporter_api_errors_total` | `api`, `operation` | Failed API calls (`api` = `rest` or `graphql`) |
 | `cloudflare_exporter_collections_total` | `result` | Collection cycles: `success`, `partial`, `failure` |
@@ -274,6 +308,15 @@ sum by (zone, source) (cloudflare_zone_hourly_firewall_events{action="block"})
 # Top 5 countries by requests for one zone
 topk(5, cloudflare_zone_hourly_requests_by_country{zone="example.com", country!="other"})
 
+# Tunnels that are not healthy
+cloudflare_tunnel_status{status="healthy"} == 0
+
+# Tunnels running with fewer than 2 connectors (no redundancy)
+cloudflare_tunnel_connectors < 2
+
+# Tunnels whose connectors run different cloudflared versions
+count by (account, tunnel) (count by (account, tunnel, version) (cloudflare_tunnel_connector_info)) > 1
+
 # Requests over the last 24 hours (one sample per hour)
 sum_over_time(cloudflare_zone_hourly_requests{zone="example.com"}[24h:1h])
 ```
@@ -286,6 +329,9 @@ groups:
     rules:
       - alert: CloudflareExporterStale
         expr: time() - cloudflare_exporter_last_success_timestamp_seconds > 3 * 3600
+      - alert: CloudflareTunnelDown
+        expr: cloudflare_tunnel_up == 0
+        for: 10m
       - alert: CloudflareHigh5xxRatio
         expr: |
           sum by (zone) (cloudflare_zone_hourly_requests_by_status{status=~"5.."})
